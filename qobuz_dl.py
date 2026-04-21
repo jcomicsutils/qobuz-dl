@@ -105,6 +105,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "socks5_proxy":    "",
     "include_version": True,
     "force_main_album_artist": False,
+    "strip_feat_from_album_title": False,
+    "strip_feat_from_track_title": False,
 }
 
 TEMPLATE_HELP = """
@@ -391,6 +393,34 @@ def apply_version_to_title(data: Dict) -> None:
         if f"({version})" not in title:
             data["title"] = f"{title} ({version.strip()})"
 
+
+# Matches "(feat. ...)", "[ft. ...]", "{featuring ...}" etc. at the end of a title —
+# case-insensitive, anchored to $ so it won't fire mid-title.
+_FEAT_RE = re.compile(
+    r"(?i)\s*[(\[{]\s*(?:feat\.?|ft\.?|featuring|featured)\s+([^()\[\]{}]+)[)\]}]\s*$"
+)
+
+
+def _track_has_featured_artist(track: Dict) -> bool:
+    """Return True if Qobuz's performers string explicitly lists a FeaturedArtist role.
+    This field is only present on track objects, not album objects."""
+    performers = track.get("performers", "")
+    return bool(performers) and "FeaturedArtist" in performers
+
+
+def strip_feat_from_track_title(track: Dict) -> None:
+    """Remove '(feat. ...)' from a track's title, gated on Qobuz's performers
+    field confirming a featured artist is present. In-place."""
+    if not _track_has_featured_artist(track):
+        return
+    track["title"] = _FEAT_RE.sub("", track.get("title", "")).strip()
+
+
+def strip_feat_from_album_title(album: Dict) -> None:
+    """Remove '(feat. ...)' from an album's title. Albums have no performers field,
+    so we rely on the regex alone — the user has already opted in via config."""
+    album["title"] = _FEAT_RE.sub("", album.get("title", "")).strip()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Cover art
 # ─────────────────────────────────────────────────────────────────────────────
@@ -661,6 +691,13 @@ def download_album(
         for t in tracks:
             apply_version_to_title(t)
 
+    # Strip featured-artist text from titles if configured
+    if cfg.get("strip_feat_from_album_title", False):
+        strip_feat_from_album_title(album)
+    if cfg.get("strip_feat_from_track_title", False):
+        for t in tracks:
+            strip_feat_from_track_title(t)
+
     folder_name = safe_format(
         folder_tmpl,
         artist    = artist,
@@ -822,6 +859,8 @@ def setup() -> None:
 
     console.print()
     cfg["include_version"] = click.confirm("Include edition/version in album and track titles?", default=cfg.get("include_version", True))
+    cfg["strip_feat_from_album_title"] = click.confirm("Try to strip featured artists from album titles?", default=cfg.get("strip_feat_from_album_title", False))
+    cfg["strip_feat_from_track_title"] = click.confirm("Try to strip featured artists from track titles?", default=cfg.get("strip_feat_from_track_title", False))
     cfg["multi_disc"]     = click.confirm("Create Disc N/ subdirectories for multi-disc albums?", default=cfg.get("multi_disc", True))
     cfg["embed_metadata"] = click.confirm("Embed metadata tags in downloaded files?", default=cfg.get("embed_metadata", True))
 
@@ -1179,6 +1218,12 @@ def dl(
                 if effective_cfg.get("include_version", False):
                     apply_version_to_title(track)
                     apply_version_to_title(album)
+
+                # Strip featured-artist text from titles if configured
+                if effective_cfg.get("strip_feat_from_track_title", False):
+                    strip_feat_from_track_title(track)
+                if effective_cfg.get("strip_feat_from_album_title", False):
+                    strip_feat_from_album_title(album)
 
                 artist = get_artists(album) or track.get("performer", {}).get("name", "")
                 main_artist = override_main_artist or get_main_artist(album) or track.get("performer", {}).get("name", "")
