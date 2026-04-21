@@ -1156,6 +1156,23 @@ def _complete_config_value(
     return []
 
 
+def _complete_id_prefixes(
+    ctx: click.Context, param: click.Parameter, incomplete: str
+) -> List[Any]:
+    """Suggest ar-id / al-id / tr-id prefixes for positional URL/ID arguments."""
+    from click.shell_completion import CompletionItem
+
+    prefixes = [
+        CompletionItem("al-id", help="album ID"),
+        CompletionItem("tr-id", help="track ID"),
+    ]
+
+    if ctx.command.name != "info":
+        prefixes.insert(0, CompletionItem("ar-id", help="artist ID"))
+
+    return [p for p in prefixes if p.value.startswith(incomplete)]
+
+
 @cli.command("config")
 @click.argument("key",   required=False, shell_complete=_complete_config_key)
 @click.argument("value", required=False, shell_complete=_complete_config_value)
@@ -1366,8 +1383,8 @@ def search(query: str, limit: int, search_type: str) -> None:
 
 
 @cli.command("dl")
-@click.argument("urls", nargs=-1, required=True, metavar="URL [URL …]")
-@click.option("-d", "--dir",       "download_dir",     default=None, help="Override download directory")
+@click.argument("urls", nargs=-1, required=True, metavar="URL [URL …]", shell_complete=_complete_id_prefixes)
+@click.option("-d", "--dir",       "download_dir",     default=None, type=click.Path(file_okay=False, dir_okay=True), help="Override download directory")
 @click.option("-q", "--quality",                       default=None, type=click.Choice(list(QUALITY_MAP)), help="Audio quality")
 @click.option("-F", "--folder-template",               default=None, help="Folder naming template")
 @click.option("-f", "--track-template",                default=None, help="Track filename template  (no extension)")
@@ -1672,7 +1689,7 @@ def dl(
 
 
 @cli.command()
-@click.argument("target", nargs=-1, required=True, metavar="URL | PREFIX ID")
+@click.argument("target", nargs=-1, required=True, metavar="URL | PREFIX ID", shell_complete=_complete_id_prefixes)
 def info(target: Tuple[str, ...]) -> None:
     """Show detailed info about an album or track without downloading.
 
