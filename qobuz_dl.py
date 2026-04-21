@@ -679,6 +679,162 @@ def download_single_track(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Dry-run helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _dry_run_track_rows(
+    tracks: List[Dict],
+    out_dir: Path,
+    track_tmpl: str,
+    quality_id: str,
+    skip_existing: bool,
+    is_multidisc: bool,
+) -> Tuple[List[Tuple[str, str, str]], int, int]:
+    """Return (rows, would_download, already_exist) for a list of tracks.
+
+    Each row is a tuple of (track_label, dest_path_str, status_markup).
+    """
+    rows: List[Tuple[str, str, str]] = []
+    would_download = 0
+    already_exist  = 0
+    ext = EXT_MAP.get(quality_id, "flac")
+
+    for track in tracks:
+        album    = track.get("album", {})
+        track_no = track.get("track_number", 0)
+        disc_no  = track.get("media_number", 1)
+        title    = track.get("title", "Unknown")
+
+        filename = safe_format(
+            track_tmpl,
+            track    = track_no,
+            disc     = disc_no,
+            title    = title,
+            artist   = (
+                get_artists(album) if album.get("artists") else
+                track.get("performer", {}).get("name", "Various Artists")
+            ),
+            album    = album.get("title", ""),
+            year     = get_year(album),
+            track_id = str(track.get("id", "")),
+        ) + f".{ext}"
+        filename = clean_name(filename)
+
+        if is_multidisc:
+            dest = out_dir / f"Disc {disc_no}" / filename
+        else:
+            dest = out_dir / filename
+
+        if dest.exists():
+            status = "[dim]exists[/]"
+            already_exist += 1
+            if skip_existing:
+                action = "[dim]skip[/]"
+            else:
+                action = "[yellow]overwrite[/]"
+                would_download += 1
+        else:
+            status = "[green]new[/]"
+            action = "[green]download[/]"
+            would_download += 1
+
+        rows.append((f"{track_no:>3}. {title[:50]}", str(dest), action))
+
+    return rows, would_download, already_exist
+
+
+def dry_run_album(
+    api:          QobuzAPI,
+    album_id:     str,
+    cfg:          Dict[str, Any],
+    quality_id:   str,
+    root_dir:     Path,
+    folder_tmpl:  str,
+    track_tmpl:   str,
+    override_main_artist: Optional[str] = None,
+    global_artist_id: Optional[str] = None,
+    auto_override_id: bool = False,
+) -> Optional[str]:
+    """Print a dry-run preview table for one album. Returns the artist_id string."""
+    with console.status("Fetching album info…"):
+        try:
+            album = api.get_album(album_id)
+        except Exception as exc:
+            console.print(f"[red]✗ Could not fetch album {album_id}: {exc}[/]")
+            return global_artist_id
+
+    artist      = get_artists(album)
+    main_artist = override_main_artist or get_main_artist(album)
+    title       = album.get("title", "Unknown Album")
+    year        = get_year(album)
+    genre       = album.get("genre", {}).get("name", "")
+    label       = album.get("label", {}).get("name", "")
+    quality     = get_quality_tag(album)
+    tracks      = album.get("tracks", {}).get("items", [])
+
+    actual_artist_id = str(album.get("artist", {}).get("id", ""))
+    artist_id_val    = (global_artist_id or actual_artist_id) if auto_override_id else actual_artist_id
+    album_id_val     = str(album.get("id", album_id))
+
+    for t in tracks:
+        t["album"] = album
+
+    if cfg.get("include_version", False):
+        apply_version_to_title(album)
+        for t in tracks:
+            apply_version_to_title(t)
+    if cfg.get("strip_feat_from_album_title", False):
+        strip_feat_from_album_title(album)
+    if cfg.get("strip_feat_from_track_title", False):
+        for t in tracks:
+            strip_feat_from_track_title(t)
+
+    folder_name = safe_format(
+        folder_tmpl,
+        artist      = artist,
+        main_artist = main_artist,
+        album       = album.get("title", "Unknown Album"),
+        year        = year,
+        genre       = genre,
+        label       = label,
+        quality     = quality,
+        artist_id   = artist_id_val,
+        album_id    = album_id_val,
+    )
+    out_dir = root_dir / folder_name
+
+    disc_nos     = sorted({t.get("media_number", 1) for t in tracks})
+    is_multidisc = len(disc_nos) > 1 and cfg.get("multi_disc", True)
+
+    skip_existing = cfg.get("skip_existing", True)
+    rows, would_download, already_exist = _dry_run_track_rows(
+        tracks, out_dir, track_tmpl, quality_id, skip_existing, is_multidisc
+    )
+
+    # ── print summary panel ──────────────────────────────────────────────────
+    console.print(
+        Panel(
+            f"[bold]{artist}[/] — [italic]{title}[/]  [dim]({year})[/]\n"
+            f"[dim]Folder:[/] {out_dir}\n"
+            f"{len(tracks)} track(s)  ·  {quality}  ·  "
+            f"[green]{would_download} to download[/]  ·  [dim]{already_exist} already exist[/]",
+            title="[bold blue]Dry Run — Album[/]",
+            border_style="blue",
+        )
+    )
+
+    t = Table(border_style="dim", show_lines=False, show_header=True)
+    t.add_column("Track",  max_width=55)
+    t.add_column("Action", justify="center", no_wrap=True)
+    for track_label, _dest, action in rows:
+        t.add_row(track_label, action)
+    console.print(t)
+
+    return artist_id_val
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Album download orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1176,6 +1332,7 @@ def search(query: str, limit: int, search_type: str) -> None:
 @click.option("--no-metadata",     "no_metadata",      is_flag=True, help="Skip metadata embedding")
 @click.option("--no-cover",        "no_cover",         is_flag=True, help="Skip saving cover.jpg")
 @click.option("--no-skip",         "no_skip",          is_flag=True, help="Re-download even if file exists")
+@click.option("--dry-run",         "dry_run",          is_flag=True, help="Preview what would be downloaded — no files written")
 @click.option("--override-main-artist",                default=None, help="Override the main artist (Album Artist) for this run")
 @click.option("--override-artist-id",                  is_flag=True, help=(
     "Force a single artist_id across all downloads in this run. "
@@ -1191,6 +1348,7 @@ def dl(
     no_metadata: bool,
     no_cover: bool,
     no_skip: bool,
+    dry_run: bool,
     override_main_artist: Optional[str],
     override_artist_id: bool,
 ) -> None:
@@ -1210,6 +1368,11 @@ def dl(
       qobuz-dl dl tr-id 23929921
       qobuz-dl dl ar-id 707261 al-id 0060253780948
 
+    Use --dry-run to preview what would be downloaded without writing any files:
+
+      qobuz-dl dl ar-id 707261 --dry-run
+      qobuz-dl dl al-id 0060253780948 --dry-run
+
     """ + TEMPLATE_HELP
     cfg = load_config()
     api = QobuzAPI(cfg)
@@ -1225,6 +1388,14 @@ def dl(
         "save_cover":     not no_cover    and cfg.get("save_cover",     True),
         "skip_existing":  not no_skip     and cfg.get("skip_existing",  True),
     }
+
+    if dry_run:
+        console.print(
+            Panel(
+                "[bold yellow]Dry run[/] — resolving targets, no files will be written.",
+                border_style="yellow",
+            )
+        )
 
     console.print(
         f"[dim]Quality:[/] {QUALITY_LABELS.get(quality_id, quality_id)}  "
@@ -1249,10 +1420,16 @@ def dl(
     for kind, id_ in targets:
 
         if kind == "album":
-            res_id = download_album(
-                api, id_, effective_cfg, quality_id, root_dir, f_tmpl, t_tmpl,
-                override_main_artist, global_artist_id, auto_override_id
-            )
+            if dry_run:
+                res_id = dry_run_album(
+                    api, id_, effective_cfg, quality_id, root_dir, f_tmpl, t_tmpl,
+                    override_main_artist, global_artist_id, auto_override_id,
+                )
+            else:
+                res_id = download_album(
+                    api, id_, effective_cfg, quality_id, root_dir, f_tmpl, t_tmpl,
+                    override_main_artist, global_artist_id, auto_override_id
+                )
             if auto_override_id and not global_artist_id and res_id:
                 global_artist_id = res_id
 
@@ -1304,6 +1481,51 @@ def dl(
                     album_id  = str(album.get("id", "")),
                 )
                 out_dir = root_dir / folder
+
+                if dry_run:
+                    # Resolve the track filename the same way download_single_track would
+                    ext      = EXT_MAP.get(quality_id, "flac")
+                    track_no = track.get("track_number", 0)
+                    disc_no  = track.get("media_number", 1)
+                    title    = track.get("title", "Unknown")
+                    filename = safe_format(
+                        t_tmpl,
+                        track    = track_no,
+                        disc     = disc_no,
+                        title    = title,
+                        artist   = (
+                            get_artists(album) if album.get("artists") else
+                            track.get("performer", {}).get("name", "Various Artists")
+                        ),
+                        album    = album.get("title", ""),
+                        year     = get_year(album),
+                        track_id = str(track.get("id", "")),
+                    ) + f".{ext}"
+                    filename = clean_name(filename)
+                    dest     = out_dir / filename
+
+                    exists = dest.exists()
+                    skip   = effective_cfg.get("skip_existing", True)
+                    if exists and skip:
+                        action_markup = "[dim]skip (exists)[/]"
+                    elif exists:
+                        action_markup = "[yellow]overwrite[/]"
+                    else:
+                        action_markup = "[green]download[/]"
+
+                    console.print(
+                        Panel(
+                            f"[bold]{artist}[/] — [italic]{title}[/]\n"
+                            f"[dim]Dest:[/] {dest}\n"
+                            f"Action: {action_markup}",
+                            title="[bold blue]Dry Run — Track[/]",
+                            border_style="blue",
+                        )
+                    )
+
+                    if auto_override_id and not global_artist_id and actual_artist_id:
+                        global_artist_id = actual_artist_id
+                    continue
 
                 track_meta_flds = get_meta_fields(effective_cfg)
                 embed_cover_in_file = track_meta_flds is not None and track_meta_flds.get("cover", True)
@@ -1379,11 +1601,18 @@ def dl(
                         for stub in items:
                             album_id = stub.get("id") or stub.get("qobuz_id")
                             if album_id:
-                                res_id = download_album(
-                                    api, str(album_id), effective_cfg,
-                                    quality_id, root_dir, f_tmpl, t_tmpl,
-                                    override_main_artist, global_artist_id, auto_override_id
-                                )
+                                if dry_run:
+                                    res_id = dry_run_album(
+                                        api, str(album_id), effective_cfg,
+                                        quality_id, root_dir, f_tmpl, t_tmpl,
+                                        override_main_artist, global_artist_id, auto_override_id,
+                                    )
+                                else:
+                                    res_id = download_album(
+                                        api, str(album_id), effective_cfg,
+                                        quality_id, root_dir, f_tmpl, t_tmpl,
+                                        override_main_artist, global_artist_id, auto_override_id
+                                    )
                                 if auto_override_id and not global_artist_id and res_id:
                                     global_artist_id = res_id
                         if not has_more:
@@ -1392,6 +1621,9 @@ def dl(
 
             except Exception as exc:
                 console.print(f"[red]✗ Artist download error: {exc}[/]")
+
+    if dry_run:
+        console.print("\n[bold yellow]Dry run complete — nothing was downloaded.[/]\n")
 
 
 # ── info ──────────────────────────────────────────────────────────────────────
