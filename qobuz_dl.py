@@ -996,17 +996,21 @@ def download_album(
 )
 @click.pass_context
 def cli(ctx: click.Context, verbose: bool) -> None:
-    """qobuz-dl — Download music from Qobuz via the official API.
+    """Download music from Qobuz via the official API.
 
     \b
-    Quick start:
-      1.  qobuz-dl setup
-      2.  qobuz-dl search "Pink Floyd"
-      3.  qobuz-dl dl https://open.qobuz.com/album/...
+    Quick start
+    ───────────
+      1.  qobuz-dl setup                          Configure credentials & preferences
+      2.  qobuz-dl search "Death in June"            Find albums, tracks, artists
+      3.  qobuz-dl dl al-id <id>                  Download by ID
+          qobuz-dl dl https://play.qobuz.com/…   Download by URL
 
-    Pass --verbose / -v before the subcommand to enable debug output:
-      qobuz-dl --verbose dl https://open.qobuz.com/album/...
-      qobuz-dl -v search "Radiohead"
+    \b
+    Debug output
+    ────────────
+      qobuz-dl --verbose dl https://play.qobuz.com/album/…
+      qobuz-dl -v search "Merzbow"
     """
     global _VERBOSE
     _VERBOSE = verbose
@@ -1297,9 +1301,9 @@ def search(query: str, limit: int, search_type: str) -> None:
 
     \b
     Examples:
-      qobuz-dl search "Daft Punk"
-      qobuz-dl search "Random Access Memories" -t albums -n 5
-      qobuz-dl search "Get Lucky" -t tracks
+      qobuz-dl search "Steve Roden"
+      qobuz-dl search "Salmon Run" -t albums -n 5
+      qobuz-dl search "djinns não são bons para trabalhos de amor" -t tracks
     """
     cfg = load_config()
     api = QobuzAPI(cfg)
@@ -1328,7 +1332,7 @@ def search(query: str, limit: int, search_type: str) -> None:
                 bits = a.get("maximum_bit_depth", 0)
                 rate = a.get("maximum_sampling_rate", 0)
                 q    = f"{bits}b/{int(rate)}k" if bits and rate else "—"
-                url  = f"https://open.qobuz.com/album/{a['id']}"
+                url  = f"https://play.qobuz.com/album/{a['id']}"
                 t.add_row(
                     str(i),
                     get_artists(a),
@@ -1351,7 +1355,7 @@ def search(query: str, limit: int, search_type: str) -> None:
             t.add_column("Album",  max_width=28)
             t.add_column("URL",    style="dim", overflow="fold")
             for i, tr in enumerate(items, 1):
-                url = f"https://open.qobuz.com/track/{tr['id']}"
+                url = f"https://play.qobuz.com/track/{tr['id']}"
                 t.add_row(
                     str(i),
                     tr.get("performer", {}).get("name", ""),
@@ -1371,7 +1375,7 @@ def search(query: str, limit: int, search_type: str) -> None:
             t.add_column("Albums", justify="center", no_wrap=True)
             t.add_column("URL",    style="dim", overflow="fold")
             for i, a in enumerate(items, 1):
-                url = f"https://open.qobuz.com/artist/{a['id']}"
+                url = f"https://play.qobuz.com/artist/{a['id']}"
                 t.add_row(str(i), a.get("name", ""), str(a.get("albums_count", "?")), url)
             console.print(t)
 
@@ -1411,28 +1415,36 @@ def dl(
     override_main_artist: Optional[str],
     override_artist_id: bool,
 ) -> None:
-    """Download one or more albums, tracks, or artist discographies.
+    """Download albums, tracks, or entire artist discographies.
 
     \b
-    Accepts Qobuz URLs or bare IDs.  Pass multiple targets at once:
-
-      qobuz-dl dl <url> <url2> ...
-      qobuz-dl dl https://open.qobuz.com/album/0060253780948
-      qobuz-dl dl https://open.qobuz.com/artist/5765466
-
-    Bare-ID shortcuts (no URL needed):
-
+    Targets — pass URLs or prefixed IDs, mix freely, batch as many as you like:
+      qobuz-dl dl https://play.qobuz.com/album/0060253780948
+      qobuz-dl dl https://play.qobuz.com/artist/5765466
       qobuz-dl dl ar-id 707261
       qobuz-dl dl al-id 0060253780948
       qobuz-dl dl tr-id 23929921
-      qobuz-dl dl ar-id 707261 al-id 0060253780948
+      qobuz-dl dl ar-id 707261 al-id 0060253780948 https://play.qobuz.com/track/229720604
 
-    Use --dry-run to preview what would be downloaded without writing any files:
+    \b
+    Prefixes:  ar-id = artist  |  al-id = album  |  tr-id = track
+    Bare IDs without a prefix are rejected — the type would be ambiguous.
 
-      qobuz-dl dl ar-id 707261 --dry-run
-      qobuz-dl dl al-id 0060253780948 --dry-run
+    \b
+    Common flags:
+      -q cd                                    Quality override for this run
+      --dry-run                                Preview without writing files
+      -F "{main_artist}/{album} ({year})"      Custom folder template
+      -f "{track:02d}. {title}"               Custom track filename template
 
-    """ + TEMPLATE_HELP
+    \b
+    Template variables
+    ──────────────────
+    Folder:  {artist}  {main_artist}  {album}  {year}  {genre}  {label}
+             {quality}  {artist_id}  {album_id}
+    Track:   {track}  {track:02d}  {disc}  {title}  {artist}  {album}
+             {year}  {track_id}
+    """
     cfg = load_config()
     api = QobuzAPI(cfg)
 
@@ -1696,9 +1708,9 @@ def info(target: Tuple[str, ...]) -> None:
     \b
     Accepts a Qobuz URL or a prefixed ID (al-id, tr-id):
 
-      qobuz-dl info https://open.qobuz.com/album/0060253780948
-      qobuz-dl info https://open.qobuz.com/track/23929921
-      qobuz-dl info al-id 0060253780948
+      qobuz-dl info https://play.qobuz.com/album/0060253780948\n
+      qobuz-dl info https://play.qobuz.com/track/23929921\n
+      qobuz-dl info al-id 0060253780948\n
       qobuz-dl info tr-id 23929921
     """
     cfg  = load_config()
@@ -1851,12 +1863,12 @@ def completions_cmd(shell_name: Optional[str], install: bool, print_only: bool) 
     One-shot install (auto-detects your shell):
       qobuz-dl completions --install
 
-    Explicit shell:
-      qobuz-dl completions --shell fish --install
-      qobuz-dl completions --shell bash --install
+    Explicit shell:\n
+      qobuz-dl completions --shell fish --install\n
+      qobuz-dl completions --shell bash --install\n
       qobuz-dl completions --shell zsh  --install
 
-    Print the raw script to stdout (pipe it wherever you like):
+    Print the raw script to stdout (pipe it wherever you like):\n
       qobuz-dl completions --shell fish --print-only
 
     \b
