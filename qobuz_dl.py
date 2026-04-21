@@ -35,6 +35,21 @@ from rich.table import Table
 console = Console()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Verbose / debug helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Module-level flag — set to True by the --verbose CLI option before any
+# subcommand runs.  All code can call dbg() without passing state around.
+_VERBOSE: bool = False
+
+
+def dbg(msg: str) -> None:
+    """Print a debug line when --verbose is active.  Silently a no-op otherwise."""
+    if _VERBOSE:
+        console.print(f"[dim][DEBUG][/dim] {msg}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Constants & defaults
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -136,11 +151,14 @@ Examples
 
 def load_config() -> Dict[str, Any]:
     if CONFIG_FILE.exists():
+        dbg(f"Loading config from {CONFIG_FILE}")
         with open(CONFIG_FILE) as f:
             cfg = json.load(f)
         for k, v in DEFAULT_CONFIG.items():
             cfg.setdefault(k, v)
+        dbg(f"Config loaded — quality={cfg.get('quality')!r}  download_dir={cfg.get('download_dir')!r}")
         return cfg
+    dbg("No config file found — using built-in defaults")
     return dict(DEFAULT_CONFIG)
 
 
@@ -200,7 +218,11 @@ class QobuzAPI:
     def _get(self, endpoint: str, **params: Any) -> Any:
         base = self.cfg.get("api_base", DEFAULT_CONFIG["api_base"]).rstrip("/")
         url  = f"{base}/{endpoint.lstrip('/')}"
+        # Mask the auth token in debug output so logs are safe to share
+        safe_params = {k: ("***" if k == "request_sig" else v) for k, v in params.items()}
+        dbg(f"GET {url}  params={safe_params}")
         r    = self.session.get(url, headers=self._headers(), params=params, timeout=30)
+        dbg(f"→ HTTP {r.status_code}  ({len(r.content)} bytes)")
         r.raise_for_status()
         return r.json()
 
@@ -243,6 +265,7 @@ class QobuzAPI:
             f"intentstreamtrack_id{track_id}{ts}{secret}"
         )
         sig_md5 = hashlib.md5(r_sig.encode()).hexdigest()
+        dbg(f"Requesting file URL — track_id={track_id}  format_id={quality}  ts={ts}")
         data    = self._get(
             "track/getFileUrl",
             format_id=quality,
@@ -251,6 +274,8 @@ class QobuzAPI:
             request_ts=ts,
             request_sig=sig_md5,
         )
+        dbg(f"File URL obtained — mime={data.get('mime_type')!r}  "
+            f"sampling_rate={data.get('sampling_rate')}  bit_depth={data.get('bit_depth')}")
         return data["url"]
 
 
@@ -432,12 +457,16 @@ def fetch_cover(album: Dict, session: requests.Session) -> Optional[bytes]:
         # Replace last 7 chars (e.g. "600.jpg") with "org.jpg" for full-res
         img_url = img_url[:-7] + "org.jpg"
     if not img_url:
+        dbg("No cover image URL found in album data")
         return None
+    dbg(f"Fetching cover art from {img_url}")
     try:
         r = session.get(img_url, timeout=20)
         r.raise_for_status()
+        dbg(f"Cover art fetched — {len(r.content)} bytes")
         return r.content
-    except Exception:
+    except Exception as exc:
+        dbg(f"Cover art fetch failed: {exc}")
         return None
 
 
@@ -451,6 +480,7 @@ def embed_flac_metadata(
 ) -> None:
     """Write Vorbis comment tags to a FLAC file, respecting per-field gates."""
     f = fields  # shorthand
+    dbg(f"Embedding FLAC metadata → {path.name}  enabled_fields={[k for k,v in f.items() if v]}")
     try:
         from mutagen.flac import FLAC, Picture  # type: ignore
 
@@ -498,6 +528,7 @@ def embed_mp3_metadata(
 ) -> None:
     """Write ID3 tags to an MP3 file, respecting per-field gates."""
     f = fields  # shorthand
+    dbg(f"Embedding MP3/ID3 metadata → {path.name}  enabled_fields={[k for k,v in f.items() if v]}")
     try:
         from mutagen.id3 import (  # type: ignore
             APIC, ID3, TALB, TCOP, TCON, TDRC, TIT2, TPE1, TPE2, TPOS,
@@ -553,17 +584,23 @@ def stream_download(
     progress: Progress,
     task: TaskID,
 ) -> bool:
+    dbg(f"Streaming download → {dest}")
+    dbg(f"  URL: {url}")
     try:
         with session.get(url, stream=True, timeout=60) as r:
             r.raise_for_status()
             total = int(r.headers.get("content-length", 0))
+            dbg(f"  Content-Length: {total} bytes")
             progress.update(task, total=total)
             dest.parent.mkdir(parents=True, exist_ok=True)
+            written = 0
             with open(dest, "wb") as f:
                 for chunk in r.iter_content(chunk_size=131072):
                     if chunk:
                         f.write(chunk)
+                        written += len(chunk)
                         progress.advance(task, len(chunk))
+        dbg(f"  Download complete — {written} bytes written")
         return True
     except requests.RequestException as exc:
         console.print(f"  [red]✗ Network error: {exc}[/]")
@@ -608,8 +645,10 @@ def download_single_track(
     ) + f".{ext}"
     filename = clean_name(filename)
     dest     = out_dir / filename
+    dbg(f"Track {track_no} → {dest}")
 
     if skip_existing and dest.exists():
+        dbg(f"  Skipping — file already exists")
         console.print(f"  [dim]⟳[/] {filename}")
         return True
 
@@ -711,10 +750,12 @@ def download_album(
         album_id  = album_id_val,
     )
     out_dir = root_dir / folder_name
+    dbg(f"Album output dir → {out_dir}")
 
     # Detect multi-disc
     disc_nos    = sorted({t.get("media_number", 1) for t in tracks})
     is_multidisc = len(disc_nos) > 1 and cfg.get("multi_disc", True)
+    dbg(f"Disc(s): {disc_nos}  multi_disc={is_multidisc}  tracks={len(tracks)}")
 
     console.print(
         Panel(
@@ -791,7 +832,14 @@ def download_album(
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option("1.0.0", prog_name="qobuz-dl")
-def cli() -> None:
+@click.option(
+    "-v", "--verbose",
+    is_flag=True,
+    default=False,
+    help="Enable verbose/debug output (API calls, file paths, metadata decisions).",
+)
+@click.pass_context
+def cli(ctx: click.Context, verbose: bool) -> None:
     """qobuz-dl — Download music from Qobuz via the official API.
 
     \b
@@ -799,7 +847,15 @@ def cli() -> None:
       1.  qobuz-dl setup
       2.  qobuz-dl search "Pink Floyd"
       3.  qobuz-dl dl https://open.qobuz.com/album/...
+
+    Pass --verbose / -v before the subcommand to enable debug output:
+      qobuz-dl --verbose dl https://open.qobuz.com/album/...
+      qobuz-dl -v search "Radiohead"
     """
+    global _VERBOSE
+    _VERBOSE = verbose
+    if verbose:
+        console.print("[dim][DEBUG] Verbose mode enabled[/dim]")
 
 
 # ── setup ─────────────────────────────────────────────────────────────────────
@@ -1342,18 +1398,29 @@ def dl(
 
 
 @cli.command()
-@click.argument("url")
-def info(url: str) -> None:
+@click.argument("target", nargs=-1, required=True, metavar="URL | PREFIX ID")
+def info(target: Tuple[str, ...]) -> None:
     """Show detailed info about an album or track without downloading.
 
     \b
-    Examples:
+    Accepts a Qobuz URL or a prefixed ID (al-id, tr-id):
+
       qobuz-dl info https://open.qobuz.com/album/0060253780948
       qobuz-dl info https://open.qobuz.com/track/23929921
+      qobuz-dl info al-id 0060253780948
+      qobuz-dl info tr-id 23929921
     """
     cfg  = load_config()
     api  = QobuzAPI(cfg)
-    kind, id_ = resolve_url(url)
+
+    targets = parse_targets(target)
+    if len(targets) != 1:
+        raise click.ClickException("info accepts exactly one album or track target.")
+    kind, id_ = targets[0]
+    if kind == "artist":
+        raise click.ClickException(
+            "info does not support artist targets. Use an album or track URL/ID."
+        )
 
     with console.status("Fetching info…"):
         try:
