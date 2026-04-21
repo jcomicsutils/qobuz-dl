@@ -1113,10 +1113,52 @@ def setup() -> None:
 
 # ── config ────────────────────────────────────────────────────────────────────
 
+# Keys that accept true/false values
+_BOOL_CONFIG_KEYS = {
+    "embed_metadata", "save_cover", "skip_existing", "multi_disc",
+    "include_version", "force_main_album_artist", "strip_feat_from_album_title",
+    "strip_feat_from_track_title",
+}
+
+
+def _complete_config_key(
+    ctx: click.Context, param: click.Parameter, incomplete: str
+) -> List[Any]:
+    from click.shell_completion import CompletionItem
+
+    plain_keys = list(DEFAULT_CONFIG.keys())
+    dot_keys   = (
+        [f"metadata_fields.{f}" for f in METADATA_FIELDS]
+        + ["metadata_fields.all"]
+    )
+    return [
+        CompletionItem(k)
+        for k in plain_keys + dot_keys
+        if k.startswith(incomplete)
+    ]
+
+
+def _complete_config_value(
+    ctx: click.Context, param: click.Parameter, incomplete: str
+) -> List[Any]:
+    from click.shell_completion import CompletionItem
+
+    key = ctx.params.get("key") or ""
+
+    if key == "quality":
+        return [CompletionItem(k) for k in QUALITY_MAP if k.startswith(incomplete)]
+
+    if key in _BOOL_CONFIG_KEYS or key.startswith("metadata_fields"):
+        return [
+            CompletionItem(v) for v in ("true", "false") if v.startswith(incomplete)
+        ]
+
+    return []
+
 
 @cli.command("config")
-@click.argument("key", required=False)
-@click.argument("value", required=False)
+@click.argument("key",   required=False, shell_complete=_complete_config_key)
+@click.argument("value", required=False, shell_complete=_complete_config_value)
 def config_cmd(key: Optional[str], value: Optional[str]) -> None:
     """View or set a configuration value.
 
