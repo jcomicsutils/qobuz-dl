@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "qobuz-dl"
+version         = "1.0.0"
+description     = "Feature-rich command-line downloader for Qobuz"
+readme          = "README.md"
+requires-python = ">=3.10"
+license         = { text = "GNU General Public License v3.0" }
+
+dependencies = [
+    "click>=8.1",
+    "requests>=2.31",
+    "rich>=13.0",
+    "mutagen>=1.47",
+    # Optional: PySocks gives SOCKS5 proxy support
+    # "PySocks>=1.7",
+]
+
+[project.scripts]
+qobuz-dl = "qobuz_dl:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qobuz_dl*"]
+
+[tool.setuptools]
+py-modules = ["qobuz_dl"]
