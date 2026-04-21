@@ -24,13 +24,6 @@ where relevant, implementation hints.
 - On the final failure, keep the partial file and print its path so the user
   can resume manually or rerun with `--no-skip`
 
-### Dry-run mode
-- Add a `--dry-run` flag to `dl`
-- When active, resolve all targets and print a table showing: target type,
-  resolved folder path, number of tracks, which files already exist vs would
-  be downloaded — then exit without writing anything to disk
-- Helpful before kicking off a large artist discography grab
-
 ---
 
 ## Medium priority

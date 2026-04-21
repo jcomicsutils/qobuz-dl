@@ -1718,6 +1718,144 @@ def info(target: Tuple[str, ...]) -> None:
         )
 
 
+# ── completions ───────────────────────────────────────────────────────────────
+
+_SHELL_INSTALL_PATHS: Dict[str, Path] = {
+    "fish": Path.home() / ".config" / "fish" / "completions" / "qobuz-dl.fish",
+    "bash": Path.home() / ".bash_completion.d" / "qobuz-dl",
+    "zsh":  Path.home() / ".zfunc" / "_qobuz-dl",
+}
+
+_SHELL_ACTIVATE_HINTS: Dict[str, str] = {
+    "fish": "Restart your shell, or run:  source ~/.config/fish/completions/qobuz-dl.fish",
+    "bash": (
+        "Add this line to ~/.bashrc, then run  source ~/.bashrc :\n"
+        '  source "~/.bash_completion.d/qobuz-dl"'
+    ),
+    "zsh": (
+        "Add these lines to ~/.zshrc, then run  source ~/.zshrc :\n"
+        "  fpath=(~/.zfunc $fpath)\n"
+        "  autoload -Uz compinit && compinit"
+    ),
+}
+
+
+def _detect_shell() -> Optional[str]:
+    """Guess the running shell from $SHELL."""
+    name = Path(os.environ.get("SHELL", "")).name
+    return name if name in _SHELL_INSTALL_PATHS else None
+
+
+def _generate_completion_script(shell: str) -> str:
+    """Ask Click to emit its native completion script for *shell*.
+
+    Uses Click's public ``get_completion_class`` API (Click ≥ 8.1) to produce
+    the script in-process — no subprocess needed, and works before the
+    ``qobuz-dl`` entry-point is on PATH (e.g. during development).
+    """
+    from click.shell_completion import get_completion_class  # Click ≥ 8.0
+
+    cls = get_completion_class(shell)
+    if cls is None:
+        raise click.ClickException(
+            f"Click does not have a built-in completion class for '{shell}'.\n"
+            "  Make sure Click ≥ 8.1 is installed."
+        )
+    complete = cls(cli, {}, "qobuz-dl", "_QOBUZ_DL_COMPLETE")
+    script   = complete.source()
+    if not script or not script.strip():
+        raise click.ClickException(
+            f"Completion script generation produced no output for shell '{shell}'."
+        )
+    return script
+
+
+@cli.command("completions")
+@click.option(
+    "--shell", "shell_name",
+    type=click.Choice(["fish", "bash", "zsh"]),
+    default=None,
+    help="Target shell.  Auto-detected from $SHELL when omitted.",
+)
+@click.option(
+    "--install", is_flag=True,
+    help="Write the script to the standard completions directory and show activation instructions.",
+)
+@click.option(
+    "--print-only", is_flag=True,
+    help="Print the raw completion script to stdout (overrides --install).",
+)
+def completions_cmd(shell_name: Optional[str], install: bool, print_only: bool) -> None:
+    """Generate or install shell tab-completion scripts.
+
+    \b
+    One-shot install (auto-detects your shell):
+      qobuz-dl completions --install
+
+    Explicit shell:
+      qobuz-dl completions --shell fish --install
+      qobuz-dl completions --shell bash --install
+      qobuz-dl completions --shell zsh  --install
+
+    Print the raw script to stdout (pipe it wherever you like):
+      qobuz-dl completions --shell fish --print-only
+
+    \b
+    Manual activation (if --install doesn't fit your setup):
+      fish  →  _QOBUZ_DL_COMPLETE=fish_source qobuz-dl \\
+                 > ~/.config/fish/completions/qobuz-dl.fish
+      bash  →  eval "$(_QOBUZ_DL_COMPLETE=bash_source qobuz-dl)"   # add to ~/.bashrc
+      zsh   →  eval "$(_QOBUZ_DL_COMPLETE=zsh_source  qobuz-dl)"   # add to ~/.zshrc
+    """
+    # ── resolve shell ─────────────────────────────────────────────────────────
+    shell = shell_name
+    if shell is None:
+        shell = _detect_shell()
+        if shell is None:
+            raise click.ClickException(
+                f"Cannot auto-detect shell from $SHELL={os.environ.get('SHELL', '')!r}.\n"
+                "  Pass --shell fish|bash|zsh explicitly."
+            )
+        console.print(f"[dim]Auto-detected shell:[/] {shell}")
+
+    # ── generate script ───────────────────────────────────────────────────────
+    with console.status(f"Generating {shell} completion script…"):
+        try:
+            script = _generate_completion_script(shell)
+        except subprocess.TimeoutExpired:
+            raise click.ClickException("Timed out while generating completion script.")
+
+    dbg(f"Completion script — {len(script)} chars, first line: {script.splitlines()[0]!r}")
+
+    # ── print-only mode ───────────────────────────────────────────────────────
+    if print_only:
+        click.echo(script)
+        return
+
+    # ── install mode ──────────────────────────────────────────────────────────
+    if install:
+        dest = _SHELL_INSTALL_PATHS[shell]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(script + "\n")
+        console.print(f"[green]✓[/] Completion script written → [cyan]{dest}[/]")
+        console.print()
+        console.print(_SHELL_ACTIVATE_HINTS[shell])
+        return
+
+    # ── default: print script + hint ─────────────────────────────────────────
+    click.echo(script)
+    console.print()
+    console.print(
+        Panel(
+            f"[bold]Pipe this into your shell's completions directory, or run:[/]\n\n"
+            f"  [cyan]qobuz-dl completions --shell {shell} --install[/]\n\n"
+            + _SHELL_ACTIVATE_HINTS[shell],
+            title="[bold blue]Activate completions[/]",
+            border_style="blue",
+        )
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────

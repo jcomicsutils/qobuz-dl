@@ -47,6 +47,9 @@ You can find `app_id` and `secret` using [Qobuz-AppID-Secret-Tool](https://githu
 # 1 - run the interactive wizard
 qobuz-dl setup
 
+# 1b - install shell completions (Fish / Bash / Zsh)
+qobuz-dl completions --install
+
 # 2 - search
 qobuz-dl search "bod [包家巷]"
 qobuz-dl search "Dear Diary," -t albums
@@ -163,6 +166,35 @@ Options:
 | `--no-metadata` | Skip all metadata / tag embedding |
 | `--no-cover` | Skip saving `cover.jpg` to disk |
 | `--no-skip` | Re-download even if the file already exists |
+
+### `completions`
+
+Generate and install shell tab-completion scripts so flags and subcommands
+are suggested as you type.  Supports Fish, Bash, and Zsh.
+
+```bash
+# Auto-detect your shell and install in one step
+qobuz-dl completions --install
+
+# Explicit shell
+qobuz-dl completions --shell fish --install
+qobuz-dl completions --shell bash --install
+qobuz-dl completions --shell zsh  --install
+
+# Print the raw script to stdout (pipe it wherever you like)
+qobuz-dl completions --shell fish --print-only
+```
+
+After installing, restart your shell (or source the file as instructed) and
+Tab will complete subcommands, flags, quality choices, search types, and more.
+
+**Manual activation** (if the installer doesn't fit your setup):
+
+| Shell | Command |
+|---|---|
+| Fish | `_QOBUZ_DL_COMPLETE=fish_source qobuz-dl > ~/.config/fish/completions/qobuz-dl.fish` |
+| Bash | Add `eval "$(_QOBUZ_DL_COMPLETE=bash_source qobuz-dl)"` to `~/.bashrc` |
+| Zsh  | Add `eval "$(_QOBUZ_DL_COMPLETE=zsh_source  qobuz-dl)"` to `~/.zshrc`  |
 
 ### `info`
 
