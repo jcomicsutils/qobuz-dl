@@ -16,13 +16,8 @@ where relevant, implementation hints.
   "My Albums" favourites list in one command
 - Relevant CLI addition: `qobuz-dl dl pl-id 12345678`
 
-### Retry / resume on network failure
-- `stream_download` currently deletes the partial file on the first error and
-  returns `False` with no retry
-- Add a `--retries N` CLI flag (default `3`) and a matching `retries` config key
-- Implement exponential back-off (e.g. `2 ** attempt` seconds) between attempts
-- On the final failure, keep the partial file and print its path so the user
-  can resume manually or rerun with `--no-skip`
+### Resume on network failure
+- Build the previous feature (Retry) in a way that resuming can be added in the future, in case user picks to keep partial file. Or if user deleted only the partial file, rerunning same album would download only the missing track.
 
 ---
 

@@ -117,6 +117,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "embed_metadata":  True,
     "metadata_fields": dict(METADATA_FIELDS),
     "skip_existing":   True,
+    "retries":         3,
+    "on_final_failure": "delete_partial",  # "keep_partial" | "delete_partial" | "delete_album"
     "socks5_proxy":    "",
     "include_version": True,
     "force_main_album_artist": False,
@@ -583,47 +585,84 @@ def stream_download(
     session: requests.Session,
     progress: Progress,
     task: TaskID,
+    retries: int = 3,
 ) -> bool:
-    dbg(f"Streaming download → {dest}")
-    dbg(f"  URL: {url}")
-    try:
-        with session.get(url, stream=True, timeout=60) as r:
-            r.raise_for_status()
-            total = int(r.headers.get("content-length", 0))
-            dbg(f"  Content-Length: {total} bytes")
-            progress.update(task, total=total)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            written = 0
-            with open(dest, "wb") as f:
-                for chunk in r.iter_content(chunk_size=131072):
-                    if chunk:
-                        f.write(chunk)
-                        written += len(chunk)
-                        progress.advance(task, len(chunk))
-        dbg(f"  Download complete — {written} bytes written")
-        return True
-    except requests.RequestException as exc:
-        console.print(f"  [red]✗ Network error: {exc}[/]")
-        return False
-    except OSError as exc:
-        console.print(f"  [red]✗ File write error: {exc}[/]")
-        return False
+    """Stream *url* to *dest*, retrying up to *retries* times with exponential back-off.
 
+    Returns True on success.  The partial file (if any) is left in place on
+    failure so the caller can decide what to do with it.
+    """
+    dbg(f"Streaming download → {dest}  (retries={retries})")
+    dbg(f"  URL: {url}")
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(retries + 1):
+        if attempt > 0:
+            delay = 2 ** attempt          # 2, 4, 8 … seconds
+            dbg(f"  Retry {attempt}/{retries} — waiting {delay}s after: {last_exc}")
+            console.print(
+                f"  [yellow]⟳ Retry {attempt}/{retries}[/] — waiting {delay}s…"
+            )
+            time.sleep(delay)
+            # Reset progress bar for the new attempt
+            progress.update(task, completed=0, total=None)
+
+        try:
+            with session.get(url, stream=True, timeout=60) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                dbg(f"  Content-Length: {total} bytes  (attempt {attempt + 1})")
+                progress.update(task, total=total)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                written = 0
+                with open(dest, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=131072):
+                        if chunk:
+                            f.write(chunk)
+                            written += len(chunk)
+                            progress.advance(task, len(chunk))
+            dbg(f"  Download complete — {written} bytes written")
+            return True
+        except requests.RequestException as exc:
+            last_exc = exc
+            dbg(f"  Network error on attempt {attempt + 1}: {exc}")
+            if attempt == retries:
+                console.print(f"  [red]✗ Network error (all {retries + 1} attempt(s) failed): {exc}[/]")
+        except OSError as exc:
+            # Filesystem errors are not retriable
+            console.print(f"  [red]✗ File write error: {exc}[/]")
+            return False
+
+    return False
 
 def download_single_track(
-    api:           QobuzAPI,
-    track:         Dict,
-    out_dir:       Path,
-    track_tmpl:    str,
-    quality_id:    str,
-    cover:         Optional[bytes],
-    meta_fields:   Optional[Dict[str, bool]],
-    skip_existing: bool,
-    progress:      Progress,
-    total_tracks:  int = 1,
+    api:              QobuzAPI,
+    track:            Dict,
+    out_dir:          Path,
+    track_tmpl:       str,
+    quality_id:       str,
+    cover:            Optional[bytes],
+    meta_fields:      Optional[Dict[str, bool]],
+    skip_existing:    bool,
+    progress:         Progress,
+    total_tracks:     int = 1,
+    retries:          int = 3,
+    on_final_failure: str = "delete_partial",
     force_main_album_artist: bool = False,
-    override_main_artist: Optional[str] = None
+    override_main_artist: Optional[str] = None,
 ) -> bool:
+    """Download a single track, honouring retry and on-failure settings.
+
+    Returns True on success.
+
+    on_final_failure controls what happens to the partial file after all
+    retry attempts are exhausted:
+      "keep_partial"   — leave the partial file on disk (resume-friendly)
+      "delete_partial" — delete just the partial file and continue
+      "delete_album"   — signal the album orchestrator to wipe all album files
+                         (handled by the caller; this function deletes the
+                          partial file and returns False with that sentinel)
+    """
     album    = track.get("album", {})
     ext      = EXT_MAP.get(quality_id, "flac")
     track_no = track.get("track_number", 0)
@@ -658,10 +697,10 @@ def download_single_track(
         console.print(f"  [red]✗ URL fetch failed for '{title}': {exc}[/]")
         return False
 
-    pad = len(str(total_tracks))
+    pad   = len(str(total_tracks))
     label = f"  [cyan]{track_no:>{pad}}.[/] {title[:55]}"
     task  = progress.add_task(label, total=None)
-    ok    = stream_download(url, dest, api.session, progress, task)
+    ok    = stream_download(url, dest, api.session, progress, task, retries=retries)
     progress.remove_task(task)
 
     if ok:
@@ -672,8 +711,24 @@ def download_single_track(
                 embed_mp3_metadata(dest, track, cover, meta_fields, force_main_album_artist, override_main_artist)
         console.print(f"  [green]✓[/] {filename}")
     else:
-        if dest.exists():
-            dest.unlink(missing_ok=True)
+        # All retry attempts exhausted — apply on_final_failure policy
+        partial_exists = dest.exists()
+        if on_final_failure == "keep_partial":
+            if partial_exists:
+                console.print(
+                    f"  [yellow]⚠ Keeping partial file (resume later):[/] {filename}"
+                )
+            # Return False so the caller knows this track did not complete
+        elif on_final_failure == "delete_album":
+            if partial_exists:
+                dest.unlink(missing_ok=True)
+            # Caller (download_album) checks for this sentinel value
+            # by inspecting its own accumulated file list — we just return False
+        else:
+            # "delete_partial" (default)
+            if partial_exists:
+                dest.unlink(missing_ok=True)
+                dbg(f"  Deleted partial file: {dest}")
 
     return ok
 
@@ -939,6 +994,17 @@ def download_album(
             cover_path.write_bytes(cover)
             console.print("  [green]✓[/] cover.jpg")
 
+    retries          = int(cfg.get("retries", 3))
+    on_final_failure = cfg.get("on_final_failure", "delete_partial")
+
+    # Track every file we successfully write so we can wipe them all on
+    # delete_album failure.  cover.jpg is added separately below.
+    downloaded_files: List[Path] = []
+    if cfg.get("save_cover") and cover:
+        downloaded_files.append(out_dir / "cover.jpg")
+
+    abort_album = False
+
     with Progress(
         SpinnerColumn(),
         TextColumn("{task.description}"),
@@ -962,22 +1028,72 @@ def download_album(
             else:
                 track_dir = out_dir
 
-            download_single_track(
-                api           = api,
-                track         = track,
-                out_dir       = track_dir,
-                track_tmpl    = track_tmpl,
-                quality_id    = quality_id,
-                cover         = cover,
-                meta_fields   = meta_flds,
-                skip_existing = cfg.get("skip_existing", True),
-                progress      = progress,
-                total_tracks  = len(tracks),
+            ok = download_single_track(
+                api              = api,
+                track            = track,
+                out_dir          = track_dir,
+                track_tmpl       = track_tmpl,
+                quality_id       = quality_id,
+                cover            = cover,
+                meta_fields      = meta_flds,
+                skip_existing    = cfg.get("skip_existing", True),
+                progress         = progress,
+                total_tracks     = len(tracks),
+                retries          = retries,
+                on_final_failure = on_final_failure,
                 force_main_album_artist = cfg.get("force_main_album_artist", False),
                 override_main_artist    = override_main_artist,
             )
 
-    console.print(f"\n[bold green]✓ Done![/]  →  {out_dir}\n")
+            if ok:
+                # Record the successfully written file for potential cleanup
+                ext      = EXT_MAP.get(quality_id, "flac")
+                filename = clean_name(
+                    safe_format(
+                        track_tmpl,
+                        track    = track.get("track_number", 0),
+                        disc     = track.get("media_number", 1),
+                        title    = track.get("title", "Unknown"),
+                        artist   = (
+                            get_artists(album) if album.get("artists") else
+                            track.get("performer", {}).get("name", "Various Artists")
+                        ),
+                        album    = album.get("title", ""),
+                        year     = get_year(album),
+                        track_id = str(track.get("id", "")),
+                    ) + f".{ext}"
+                )
+                downloaded_files.append(track_dir / filename)
+            elif on_final_failure == "delete_album":
+                abort_album = True
+                break
+
+    if abort_album:
+        console.print(
+            f"  [red bold]⚠ Track failed — deleting all {len(downloaded_files)} "
+            f"downloaded file(s) for this album.[/]"
+        )
+        for f in downloaded_files:
+            try:
+                f.unlink(missing_ok=True)
+                dbg(f"  Deleted: {f}")
+            except OSError as exc:
+                dbg(f"  Could not delete {f}: {exc}")
+        # Also remove empty album directories
+        for d in sorted(out_dir.rglob("*"), reverse=True):
+            if d.is_dir():
+                try:
+                    d.rmdir()   # only removes if empty
+                except OSError:
+                    pass
+        try:
+            out_dir.rmdir()
+        except OSError:
+            pass
+        console.print(f"  [dim]Album folder cleaned up: {out_dir}[/]")
+    else:
+        console.print(f"\n[bold green]✓ Done![/]  →  {out_dir}\n")
+
     return artist_id_val
 
 
@@ -1105,6 +1221,25 @@ def setup() -> None:
     cfg["save_cover"]    = click.confirm("Save cover.jpg alongside tracks?", default=cfg.get("save_cover", True))
     cfg["skip_existing"] = click.confirm("Skip already-downloaded tracks?", default=cfg.get("skip_existing", True))
 
+    console.print()
+    cfg["retries"] = click.prompt(
+        "Retries on network failure  [0 = no retries]",
+        default=int(cfg.get("retries", 3)),
+        type=click.IntRange(0, 20),
+    )
+
+    console.print(
+        "\nOn final failure (after all retries are exhausted), what should happen?\n"
+        "  [cyan]keep_partial[/]   \u2014 keep the partial file on disk (resume-friendly)\n"
+        "  [cyan]delete_partial[/] \u2014 delete just the failed track and continue\n"
+        "  [cyan]delete_album[/]   \u2014 delete every file downloaded for that album and continue"
+    )
+    cfg["on_final_failure"] = click.prompt(
+        "On final failure",
+        default=cfg.get("on_final_failure", "delete_partial"),
+        type=click.Choice(["keep_partial", "delete_partial", "delete_album"]),
+    )
+
     socks = click.prompt(
         "\nSOCKS5 proxy  [host:port — leave blank for none]",
         default=cfg.get("socks5_proxy", ""),
@@ -1151,6 +1286,13 @@ def _complete_config_value(
 
     if key == "quality":
         return [CompletionItem(k) for k in QUALITY_MAP if k.startswith(incomplete)]
+
+    if key == "on_final_failure":
+        return [
+            CompletionItem(v)
+            for v in ("keep_partial", "delete_partial", "delete_album")
+            if v.startswith(incomplete)
+        ]
 
     if key in _BOOL_CONFIG_KEYS or key.startswith("metadata_fields"):
         return [
@@ -1277,6 +1419,18 @@ def config_cmd(key: Optional[str], value: Optional[str]) -> None:
         cfg[key] = [t.strip() for t in value.split(",") if t.strip()]
     elif key in ("embed_metadata", "save_cover", "skip_existing", "multi_disc", "include_version", "force_main_album_artist"):
         cfg[key] = value.lower() in ("true", "1", "yes", "on")
+    elif key == "retries":
+        try:
+            cfg[key] = int(value)
+        except ValueError:
+            raise click.ClickException(f"retries must be an integer, got {value!r}")
+    elif key == "on_final_failure":
+        valid = ("keep_partial", "delete_partial", "delete_album")
+        if value not in valid:
+            raise click.ClickException(
+                f"on_final_failure must be one of: {', '.join(valid)}"
+            )
+        cfg[key] = value
     else:
         cfg[key] = value
 
@@ -1396,6 +1550,7 @@ def search(query: str, limit: int, search_type: str) -> None:
 @click.option("--no-cover",        "no_cover",         is_flag=True, help="Skip saving cover.jpg")
 @click.option("--no-skip",         "no_skip",          is_flag=True, help="Re-download even if file exists")
 @click.option("--dry-run",         "dry_run",          is_flag=True, help="Preview what would be downloaded — no files written")
+@click.option("-r", "--retries",                       default=None, type=int, help="Override retry count on network failure")
 @click.option("--override-main-artist",                default=None, help="Override the main artist (Album Artist) for this run")
 @click.option("--override-artist-id",                  is_flag=True, help=(
     "Force a single artist_id across all downloads in this run. "
@@ -1412,6 +1567,7 @@ def dl(
     no_cover: bool,
     no_skip: bool,
     dry_run: bool,
+    retries: Optional[int],
     override_main_artist: Optional[str],
     override_artist_id: bool,
 ) -> None:
@@ -1458,6 +1614,8 @@ def dl(
         "embed_metadata": not no_metadata and cfg.get("embed_metadata", True),
         "save_cover":     not no_cover    and cfg.get("save_cover",     True),
         "skip_existing":  not no_skip     and cfg.get("skip_existing",  True),
+        # --retries overrides config only when explicitly passed on the CLI
+        "retries":        retries if retries is not None else int(cfg.get("retries", 3)),
     }
 
     if dry_run:
@@ -1625,21 +1783,26 @@ def dl(
                     BarColumn(), DownloadColumn(), TransferSpeedColumn(),
                     TimeRemainingColumn(), console=console, transient=True,
                 ) as progress:
-                    download_single_track(
-                        api           = api,
-                        track         = track,
-                        out_dir       = out_dir,
-                        track_tmpl    = t_tmpl,
-                        quality_id    = quality_id,
-                        cover         = cover,
-                        meta_fields   = track_meta_flds,
-                        skip_existing = effective_cfg.get("skip_existing", True),
-                        progress      = progress,
+                    ok = download_single_track(
+                        api              = api,
+                        track            = track,
+                        out_dir          = out_dir,
+                        track_tmpl       = t_tmpl,
+                        quality_id       = quality_id,
+                        cover            = cover,
+                        meta_fields      = track_meta_flds,
+                        skip_existing    = effective_cfg.get("skip_existing", True),
+                        progress         = progress,
+                        retries          = int(effective_cfg.get("retries", 3)),
+                        on_final_failure = effective_cfg.get("on_final_failure", "delete_partial"),
                         force_main_album_artist = effective_cfg.get("force_main_album_artist", False),
                         override_main_artist    = override_main_artist,
                     )
 
-                console.print(f"\n[bold green]✓ Done![/]  →  {out_dir}\n")
+                if ok:
+                    console.print(f"\n[bold green]✓ Done![/]  →  {out_dir}\n")
+                else:
+                    console.print(f"\n[yellow]⚠ Track download failed.[/]\n")
 
                 if auto_override_id and not global_artist_id and actual_artist_id:
                     global_artist_id = actual_artist_id
