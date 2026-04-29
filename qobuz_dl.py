@@ -124,6 +124,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "force_main_album_artist": False,
     "strip_feat_from_album_title": False,
     "strip_feat_from_track_title": False,
+    # ── name truncation ───────────────────────────────────────────────────────
+    # Folder segment (the part between path separators, not the full path).
+    "truncate_folder":          True,
+    "folder_truncate_pos":      "end",    # "middle" | "end"
+    "folder_truncate_marker":   "",       # inserted at the cut point
+    "folder_max_bytes":         255,
+    # Filename stem (extension is never truncated).
+    "truncate_filename":        True,
+    "filename_truncate_pos":    "end",    # "middle" | "end"
+    "filename_truncate_marker": "...",    # inserted at the cut point
+    "filename_max_bytes":       255,
 }
 
 TEMPLATE_HELP = """
@@ -291,6 +302,134 @@ def clean_name(name: str) -> str:
     for ch in ILLEGAL_CHARS:
         name = name.replace(ch, "_")
     return name.strip(". ")
+
+
+def _truncate_bytes(text: str, max_bytes: int, pos: str, marker: str) -> str:
+    """Truncate *text* so that its UTF-8 encoding fits within *max_bytes* bytes.
+
+    *pos*    — where to cut: "end" removes a suffix, "middle" removes the centre.
+    *marker* — inserted at the cut point (its own byte cost is included in the budget).
+
+    The function never returns a string whose UTF-8 byte length exceeds max_bytes.
+    If even the marker alone exceeds the budget the marker is itself trimmed to fit.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text                         # already fits — nothing to do
+
+    marker_bytes = marker.encode("utf-8")
+    marker_len   = len(marker_bytes)
+
+    # Edge case: marker itself is too long — trim it so we can still return something.
+    if marker_len >= max_bytes:
+        # Give the marker the full budget (clip it to fit).
+        clipped = bytearray()
+        for byte in marker_bytes:
+            if len(clipped) + 1 > max_bytes:
+                break
+            clipped.append(byte)
+        return clipped.decode("utf-8", errors="ignore")
+
+    budget = max_bytes - marker_len         # bytes available for actual text content
+
+    if pos == "middle":
+        half_front = budget // 2
+        half_back  = budget - half_front
+
+        # Take the first half_front bytes, respecting UTF-8 character boundaries.
+        front_raw = encoded[:half_front]
+        front_raw = front_raw[: len(front_raw) - _utf8_trailing_len(front_raw)]
+
+        # Take the last half_back bytes, respecting UTF-8 character boundaries.
+        back_raw  = encoded[-half_back:]
+        back_raw  = back_raw[_utf8_leading_len(back_raw):]
+
+        result = front_raw.decode("utf-8") + marker + back_raw.decode("utf-8")
+    else:
+        # "end" — keep the beginning, drop the tail
+        front_raw = encoded[:budget]
+        front_raw = front_raw[: len(front_raw) - _utf8_trailing_len(front_raw)]
+        result    = front_raw.decode("utf-8") + marker
+
+    return result
+
+
+def _utf8_trailing_len(data: bytes) -> int:
+    """Return how many bytes to strip from the *end* of *data* to avoid splitting
+    a multi-byte UTF-8 sequence.  Returns 0 if the last byte is already valid."""
+    strip = 0
+    for byte in reversed(data):
+        if (byte & 0xC0) == 0x80:   # continuation byte
+            strip += 1
+        else:
+            # If it's a leading byte that expects more continuations than we have,
+            # drop it too.
+            expected = 0
+            if   (byte & 0x80) == 0x00: expected = 0   # ASCII
+            elif (byte & 0xE0) == 0xC0: expected = 1   # 2-byte seq
+            elif (byte & 0xF0) == 0xE0: expected = 2   # 3-byte seq
+            elif (byte & 0xF8) == 0xF0: expected = 3   # 4-byte seq
+            if expected > strip:
+                strip += 1
+            break
+    return strip
+
+
+def _utf8_leading_len(data: bytes) -> int:
+    """Return how many bytes to strip from the *start* of *data* to avoid starting
+    in the middle of a multi-byte UTF-8 sequence."""
+    for i, byte in enumerate(data):
+        if (byte & 0xC0) != 0x80:   # not a continuation byte — valid start
+            return i
+    return len(data)
+
+
+def truncate_name(name: str, cfg: Dict[str, Any], kind: str) -> str:
+    """Apply configured truncation to a folder segment or filename stem+ext.
+
+    *kind* is either ``"folder"`` or ``"filename"``.
+
+    For filenames the extension is preserved verbatim; only the stem is subject
+    to truncation so the file remains openable by its correct application.
+    """
+    if kind == "filename":
+        enabled = cfg.get("truncate_filename", True)
+        pos     = cfg.get("filename_truncate_pos",    "end")
+        marker  = cfg.get("filename_truncate_marker", "...")
+        budget  = int(cfg.get("filename_max_bytes",   255))
+
+        if not enabled:
+            return name
+
+        # Split stem from extension so the extension is never truncated.
+        dot = name.rfind(".")
+        if dot > 0:
+            stem = name[:dot]
+            ext  = name[dot:]          # includes the leading dot, e.g. ".flac"
+        else:
+            stem = name
+            ext  = ""
+
+        ext_bytes  = len(ext.encode("utf-8"))
+        stem_budget = budget - ext_bytes
+        if stem_budget <= 0:
+            # Degenerate case: extension alone already fills the budget.
+            dbg(f"truncate_name: extension alone ({ext_bytes}B) ≥ budget ({budget}B) — returning as-is")
+            return name
+
+        stem = _truncate_bytes(stem, stem_budget, pos, marker)
+        return stem + ext
+
+    else:  # "folder"
+        enabled = cfg.get("truncate_folder", True)
+        pos     = cfg.get("folder_truncate_pos",    "end")
+        marker  = cfg.get("folder_truncate_marker", "")
+        budget  = int(cfg.get("folder_max_bytes",   255))
+
+        if not enabled:
+            return name
+
+        return _truncate_bytes(name, budget, pos, marker)
 
 
 def safe_format(template: str, **kwargs: Any) -> str:
@@ -645,6 +784,7 @@ def download_single_track(
     meta_fields:      Optional[Dict[str, bool]],
     skip_existing:    bool,
     progress:         Progress,
+    cfg:              Optional[Dict[str, Any]] = None,
     total_tracks:     int = 1,
     retries:          int = 3,
     on_final_failure: str = "delete_partial",
@@ -668,6 +808,7 @@ def download_single_track(
     track_no = track.get("track_number", 0)
     disc_no  = track.get("media_number", 1)
     title    = track.get("title", "Unknown")
+    trunc_cfg = cfg if cfg is not None else api.cfg
 
     filename = safe_format(
         track_tmpl,
@@ -682,9 +823,9 @@ def download_single_track(
         year     = get_year(album),
         track_id = str(track.get("id", "")),
     ) + f".{ext}"
-    filename = clean_name(filename)
+    filename = truncate_name(clean_name(filename), trunc_cfg, "filename")
     dest     = out_dir / filename
-    dbg(f"Track {track_no} → {dest}")
+    dbg(f"Track {track_no} → {dest}  ({len(filename.encode())}B)")
 
     if skip_existing and dest.exists():
         dbg(f"  Skipping — file already exists")
@@ -745,6 +886,7 @@ def _dry_run_track_rows(
     quality_id: str,
     skip_existing: bool,
     is_multidisc: bool,
+    cfg: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Tuple[str, str, str]], int, int]:
     """Return (rows, would_download, already_exist) for a list of tracks.
 
@@ -754,6 +896,7 @@ def _dry_run_track_rows(
     would_download = 0
     already_exist  = 0
     ext = EXT_MAP.get(quality_id, "flac")
+    trunc_cfg = cfg or {}
 
     for track in tracks:
         album    = track.get("album", {})
@@ -774,7 +917,7 @@ def _dry_run_track_rows(
             year     = get_year(album),
             track_id = str(track.get("id", "")),
         ) + f".{ext}"
-        filename = clean_name(filename)
+        filename = truncate_name(clean_name(filename), trunc_cfg, "filename")
 
         if is_multidisc:
             dest = out_dir / f"Disc {disc_no}" / filename
@@ -845,7 +988,7 @@ def dry_run_album(
         for t in tracks:
             strip_feat_from_track_title(t)
 
-    folder_name = safe_format(
+    folder_name = truncate_name(safe_format(
         folder_tmpl,
         artist      = artist,
         main_artist = main_artist,
@@ -856,7 +999,7 @@ def dry_run_album(
         quality     = quality,
         artist_id   = artist_id_val,
         album_id    = album_id_val,
-    )
+    ), cfg, "folder")
     out_dir = root_dir / folder_name
 
     disc_nos     = sorted({t.get("media_number", 1) for t in tracks})
@@ -864,7 +1007,7 @@ def dry_run_album(
 
     skip_existing = cfg.get("skip_existing", True)
     rows, would_download, already_exist = _dry_run_track_rows(
-        tracks, out_dir, track_tmpl, quality_id, skip_existing, is_multidisc
+        tracks, out_dir, track_tmpl, quality_id, skip_existing, is_multidisc, cfg
     )
 
     # ── print summary panel ──────────────────────────────────────────────────
@@ -948,7 +1091,7 @@ def download_album(
         for t in tracks:
             strip_feat_from_track_title(t)
 
-    folder_name = safe_format(
+    folder_name = truncate_name(safe_format(
         folder_tmpl,
         artist    = artist,
         main_artist = main_artist,
@@ -959,9 +1102,9 @@ def download_album(
         quality   = quality,
         artist_id = artist_id_val,
         album_id  = album_id_val,
-    )
+    ), cfg, "folder")
     out_dir = root_dir / folder_name
-    dbg(f"Album output dir → {out_dir}")
+    dbg(f"Album output dir → {out_dir}  ({len(folder_name.encode())}B)")
 
     # Detect multi-disc
     disc_nos    = sorted({t.get("media_number", 1) for t in tracks})
@@ -1038,6 +1181,7 @@ def download_album(
                 meta_fields      = meta_flds,
                 skip_existing    = cfg.get("skip_existing", True),
                 progress         = progress,
+                cfg              = cfg,
                 total_tracks     = len(tracks),
                 retries          = retries,
                 on_final_failure = on_final_failure,
@@ -1046,9 +1190,11 @@ def download_album(
             )
 
             if ok:
-                # Record the successfully written file for potential cleanup
+                # Record the successfully written file for potential cleanup.
+                # Must mirror the exact same clean+truncate pipeline used in
+                # download_single_track so the path matches what was actually written.
                 ext      = EXT_MAP.get(quality_id, "flac")
-                filename = clean_name(
+                filename = truncate_name(clean_name(
                     safe_format(
                         track_tmpl,
                         track    = track.get("track_number", 0),
@@ -1062,7 +1208,7 @@ def download_album(
                         year     = get_year(album),
                         track_id = str(track.get("id", "")),
                     ) + f".{ext}"
-                )
+                ), cfg, "filename")
                 downloaded_files.append(track_dir / filename)
             elif on_final_failure == "delete_album":
                 abort_album = True
@@ -1222,6 +1368,93 @@ def setup() -> None:
     cfg["skip_existing"] = click.confirm("Skip already-downloaded tracks?", default=cfg.get("skip_existing", True))
 
     console.print()
+    console.print("[bold]Filename truncation[/]")
+    console.print(
+        "[dim]Prevents 'File name too long' errors on filesystems with a 255-byte limit.\n"
+        "Limits apply to individual path segments (folder names, filenames), not the full path.\n"
+        "Byte lengths matter, not character counts — CJK/accented names can hit the limit sooner.[/]\n"
+    )
+    cfg["truncate_filename"] = click.confirm(
+        "  Truncate track filenames that exceed the byte limit?",
+        default=cfg.get("truncate_filename", True),
+    )
+    if not cfg["truncate_filename"]:
+        console.print(
+            "  [yellow]⚠ Warning: disabling filename truncation will cause a hard write failure\n"
+            "    for any track whose filename exceeds the filesystem limit.[/]"
+        )
+    cfg["filename_truncate_pos"] = click.prompt(
+        "  Where to truncate filenames",
+        default=cfg.get("filename_truncate_pos", "end"),
+        type=click.Choice(["end", "middle"]),
+    )
+    _fn_marker_hint = (
+        "recommended: '...'" if cfg["filename_truncate_pos"] == "middle"
+        else "recommended: leave blank"
+    )
+    _fn_marker_current = cfg.get("filename_truncate_marker", "...")
+    console.print(
+        f"  Truncation marker at cut point  [{_fn_marker_hint}]\n"
+        f"  [dim]Current value: {_fn_marker_current!r}[/]"
+    )
+    _fn_marker_raw = click.prompt(
+        "  New value (Enter = keep current, single space = set to blank)",
+        default="\x00",   # sentinel that can never be typed
+        show_default=False,
+    )
+    if _fn_marker_raw == "\x00":
+        cfg["filename_truncate_marker"] = _fn_marker_current   # kept
+    elif _fn_marker_raw == " ":
+        cfg["filename_truncate_marker"] = ""
+    else:
+        cfg["filename_truncate_marker"] = _fn_marker_raw
+    cfg["filename_max_bytes"] = click.prompt(
+        "  Maximum filename bytes  [255 = Linux/macOS limit; try 200 for SMB shares]",
+        default=int(cfg.get("filename_max_bytes", 255)),
+        type=click.IntRange(16, 255),
+    )
+
+    console.print()
+    console.print("[bold]Folder name truncation[/]")
+    console.print(
+        "[dim]Controls truncation of individual folder segments (not the full path).[/]\n"
+    )
+    cfg["truncate_folder"] = click.confirm(
+        "  Truncate folder names that exceed the byte limit?",
+        default=cfg.get("truncate_folder", True),
+    )
+    cfg["folder_truncate_pos"] = click.prompt(
+        "  Where to truncate folder names",
+        default=cfg.get("folder_truncate_pos", "end"),
+        type=click.Choice(["end", "middle"]),
+    )
+    _fo_marker_hint = (
+        "recommended: '...'" if cfg["folder_truncate_pos"] == "middle"
+        else "recommended: leave blank"
+    )
+    _fo_marker_current = cfg.get("folder_truncate_marker", "")
+    console.print(
+        f"  Truncation marker at cut point  [{_fo_marker_hint}]\n"
+        f"  [dim]Current value: {_fo_marker_current!r}[/]"
+    )
+    _fo_marker_raw = click.prompt(
+        "  New value (Enter = keep current, single space = set to blank)",
+        default="\x00",
+        show_default=False,
+    )
+    if _fo_marker_raw == "\x00":
+        cfg["folder_truncate_marker"] = _fo_marker_current   # kept
+    elif _fo_marker_raw == " ":
+        cfg["folder_truncate_marker"] = ""
+    else:
+        cfg["folder_truncate_marker"] = _fo_marker_raw
+    cfg["folder_max_bytes"] = click.prompt(
+        "  Maximum folder name bytes  [255 = Linux/macOS limit; try 200 for SMB shares]",
+        default=int(cfg.get("folder_max_bytes", 255)),
+        type=click.IntRange(16, 255),
+    )
+
+    console.print()
     cfg["retries"] = click.prompt(
         "Retries on network failure  [0 = no retries]",
         default=int(cfg.get("retries", 3)),
@@ -1256,7 +1489,7 @@ def setup() -> None:
 _BOOL_CONFIG_KEYS = {
     "embed_metadata", "save_cover", "skip_existing", "multi_disc",
     "include_version", "force_main_album_artist", "strip_feat_from_album_title",
-    "strip_feat_from_track_title",
+    "strip_feat_from_track_title", "truncate_filename", "truncate_folder",
 }
 
 
@@ -1292,6 +1525,11 @@ def _complete_config_value(
             CompletionItem(v)
             for v in ("keep_partial", "delete_partial", "delete_album")
             if v.startswith(incomplete)
+        ]
+
+    if key in ("filename_truncate_pos", "folder_truncate_pos"):
+        return [
+            CompletionItem(v) for v in ("end", "middle") if v.startswith(incomplete)
         ]
 
     if key in _BOOL_CONFIG_KEYS or key.startswith("metadata_fields"):
@@ -1419,6 +1657,21 @@ def config_cmd(key: Optional[str], value: Optional[str]) -> None:
         cfg[key] = [t.strip() for t in value.split(",") if t.strip()]
     elif key in ("embed_metadata", "save_cover", "skip_existing", "multi_disc", "include_version", "force_main_album_artist"):
         cfg[key] = value.lower() in ("true", "1", "yes", "on")
+    elif key in ("truncate_filename", "truncate_folder"):
+        cfg[key] = value.lower() in ("true", "1", "yes", "on")
+    elif key in ("filename_max_bytes", "folder_max_bytes"):
+        try:
+            cfg[key] = int(value)
+        except ValueError:
+            raise click.ClickException(f"{key} must be an integer, got {value!r}")
+    elif key == "filename_truncate_pos":
+        if value not in ("end", "middle"):
+            raise click.ClickException("filename_truncate_pos must be 'end' or 'middle'")
+        cfg[key] = value
+    elif key == "folder_truncate_pos":
+        if value not in ("end", "middle"):
+            raise click.ClickException("folder_truncate_pos must be 'end' or 'middle'")
+        cfg[key] = value
     elif key == "retries":
         try:
             cfg[key] = int(value)
@@ -1697,7 +1950,7 @@ def dl(
                 else:
                     used_artist_id = actual_artist_id
 
-                folder = safe_format(
+                folder = truncate_name(safe_format(
                     f_tmpl,
                     artist    = artist,
                     main_artist = main_artist,
@@ -1708,7 +1961,7 @@ def dl(
                     quality   = get_quality_tag(album),
                     artist_id = used_artist_id,
                     album_id  = str(album.get("id", "")),
-                )
+                ), effective_cfg, "folder")
                 out_dir = root_dir / folder
 
                 if dry_run:
@@ -1717,7 +1970,7 @@ def dl(
                     track_no = track.get("track_number", 0)
                     disc_no  = track.get("media_number", 1)
                     title    = track.get("title", "Unknown")
-                    filename = safe_format(
+                    filename = truncate_name(clean_name(safe_format(
                         t_tmpl,
                         track    = track_no,
                         disc     = disc_no,
@@ -1729,8 +1982,7 @@ def dl(
                         album    = album.get("title", ""),
                         year     = get_year(album),
                         track_id = str(track.get("id", "")),
-                    ) + f".{ext}"
-                    filename = clean_name(filename)
+                    ) + f".{ext}"), effective_cfg, "filename")
                     dest     = out_dir / filename
 
                     exists = dest.exists()
@@ -1793,6 +2045,7 @@ def dl(
                         meta_fields      = track_meta_flds,
                         skip_existing    = effective_cfg.get("skip_existing", True),
                         progress         = progress,
+                        cfg              = effective_cfg,
                         retries          = int(effective_cfg.get("retries", 3)),
                         on_final_failure = effective_cfg.get("on_final_failure", "delete_partial"),
                         force_main_album_artist = effective_cfg.get("force_main_album_artist", False),
