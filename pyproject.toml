@@ -19,12 +19,14 @@ dependencies = [
     # "PySocks>=1.7",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
 [project.scripts]
-qobuz-dl = "qobuz_dl:cli"
+qobuz-dl = "qobuz_dl.cli:cli"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where   = ["."]
 include = ["qobuz_dl*"]
-
-[tool.setuptools]
-py-modules = ["qobuz_dl"]
