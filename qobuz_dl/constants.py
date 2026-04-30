@@ -50,6 +50,34 @@ EXT_MAP: Dict[str, str] = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Cover art sizes
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maps user-facing size names to the URL suffix used by Qobuz's CDN.
+# The API's album.image object uses "thumbnail" (_50), "small" (_230),
+# and "large" (_600) keys; "original" (_org) is derived by replacing the
+# suffix on the large URL.
+COVER_SIZES: Dict[str, str] = {
+    "thumbnail": "50",
+    "small":     "230",
+    "large":     "600",
+    "original":  "org",
+}
+
+# Human-readable descriptions shown in setup / help text.
+COVER_SIZE_LABELS: Dict[str, str] = {
+    "thumbnail": "50×50  (thumbnail)",
+    "small":     "230×230",
+    "large":     "600×600",
+    "original":  "Original resolution (Usually 1400×1400 or 3000×3000)",
+}
+
+# Maximum safe byte size for cover art embedded inside an audio file.
+# FLAC's metadata block size is capped at 16 MiB by the spec; stay slightly
+# under to leave room for other metadata blocks.
+COVER_EMBED_MAX_BYTES: int = 16 * 1024 * 1024  # 16 MiB
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Filesystem
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -93,6 +121,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "track_template":  "{track:02d} - {title}",
     "multi_disc":      True,
     "save_cover":      True,
+    # Size of the cover.jpg saved alongside tracks.
+    # One of: "thumbnail", "small", "large", "original"
+    "cover_size":      "original",
+    # Size of the cover art embedded inside audio files.
+    # One of: "thumbnail", "small", "large", "original"
+    "embed_cover_size": "original",
+    # What to do when the chosen embed size is "original" and the image
+    # exceeds the 16 MiB FLAC metadata-block limit.
+    # "use_large"    — fall back to the "large" (600×600) image
+    # "skip"         — skip embedding cover art for that track
+    "embed_cover_oversize_action": "use_large",
     "embed_metadata":  True,
     "metadata_fields": dict(METADATA_FIELDS),
     "skip_existing":   True,

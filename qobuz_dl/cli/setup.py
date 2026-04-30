@@ -117,10 +117,46 @@ def setup() -> None:
                 )
             cfg["metadata_fields"] = fields
 
-    cfg["save_cover"]    = click.confirm(
+    cfg["save_cover"] = click.confirm(
         "Save cover.jpg alongside tracks?",
         default=cfg.get("save_cover", True),
     )
+
+    if cfg["save_cover"] or cfg.get("embed_metadata", True):
+        from ..constants import COVER_SIZE_LABELS
+        console.print("\n[bold]Cover art sizes[/]")
+        console.print("[dim]Available sizes:[/]")
+        for k, label in COVER_SIZE_LABELS.items():
+            console.print(f"  [cyan]{k:<12}[/] {label}")
+        console.print()
+
+    if cfg["save_cover"]:
+        cfg["cover_size"] = click.prompt(
+            "  Size for cover.jpg saved to disk",
+            default=cfg.get("cover_size", "original"),
+            type=click.Choice(["thumbnail", "small", "large", "original"]),
+        )
+
+    if cfg.get("embed_metadata", True):
+        embed_cover_enabled = {
+            **METADATA_FIELDS, **cfg.get("metadata_fields", {})
+        }.get("cover", True)
+        if embed_cover_enabled:
+            cfg["embed_cover_size"] = click.prompt(
+                "  Size for cover art embedded inside audio files",
+                default=cfg.get("embed_cover_size", "original"),
+                type=click.Choice(["thumbnail", "small", "large", "original"]),
+            )
+            if cfg["embed_cover_size"] == "original":
+                console.print(
+                    "  [dim]Original images may exceed the 16 MiB FLAC metadata-block limit.[/]"
+                )
+                cfg["embed_cover_oversize_action"] = click.prompt(
+                    "  If original image is too large for embedding",
+                    default=cfg.get("embed_cover_oversize_action", "use_large"),
+                    type=click.Choice(["use_large", "skip"]),
+                )
+
     cfg["skip_existing"] = click.confirm(
         "Skip already-downloaded tracks?",
         default=cfg.get("skip_existing", True),

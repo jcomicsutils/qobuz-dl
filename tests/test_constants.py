@@ -15,6 +15,8 @@ from qobuz_dl.constants import (
     ALBUM_URL_RE,
     TRACK_URL_RE,
     ARTIST_URL_RE,
+    COVER_SIZES,
+    COVER_SIZE_LABELS,
 )
 
 
@@ -60,6 +62,19 @@ class TestMetadataFields:
             "genre", "label", "copyright", "isrc", "upc", "cover",
         }
         assert set(METADATA_FIELDS.keys()) == expected
+
+
+class TestCoverSizes:
+    def test_every_cover_size_has_a_label(self):
+        """Every cover size key has a human-readable label."""
+        for size_key in COVER_SIZES:
+            assert size_key in COVER_SIZE_LABELS, (
+                f"COVER_SIZES[{size_key!r}] has no entry in COVER_SIZE_LABELS"
+            )
+
+    def test_expected_cover_sizes_present(self):
+        expected = {"thumbnail", "small", "large", "original"}
+        assert set(COVER_SIZES.keys()) == expected
 
 
 class TestDefaultConfig:

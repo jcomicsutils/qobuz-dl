@@ -26,7 +26,7 @@ from rich.table import Table
 from .api import QobuzAPI
 from .config import get_meta_fields
 from .constants import EXT_MAP
-from .metadata import embed_flac_metadata, embed_mp3_metadata, fetch_cover
+from .metadata import embed_flac_metadata, embed_mp3_metadata, fetch_cover, fetch_cover_for_embed
 from .utils import (
     apply_version_to_title,
     clean_name,
@@ -432,23 +432,43 @@ def download_album(
     meta_flds           = get_meta_fields(cfg)
     embed_cover_in_file = meta_flds is not None and meta_flds.get("cover", True)
 
-    cover: Optional[bytes] = None
-    if cfg.get("save_cover") or embed_cover_in_file:
-        with console.status("Fetching cover art…"):
-            cover = fetch_cover(album, api.session)
+    cover_size       = cfg.get("cover_size", "original")
+    embed_cover_size = cfg.get("embed_cover_size", "original")
+    oversize_action  = cfg.get("embed_cover_oversize_action", "use_large")
 
-    if cfg.get("save_cover") and cover:
+    cover_for_save:  Optional[bytes] = None
+    cover_for_embed: Optional[bytes] = None
+
+    need_save  = bool(cfg.get("save_cover"))
+    need_embed = embed_cover_in_file
+
+    if need_save or need_embed:
+        with console.status("Fetching cover art…"):
+            if need_save and need_embed and cover_size == embed_cover_size:
+                # Both purposes need the same size — fetch once, reuse.
+                data = fetch_cover_for_embed(album, api.session, embed_cover_size, oversize_action)
+                cover_for_save  = data
+                cover_for_embed = data
+            else:
+                if need_save:
+                    cover_for_save = fetch_cover(album, api.session, cover_size)
+                if need_embed:
+                    cover_for_embed = fetch_cover_for_embed(
+                        album, api.session, embed_cover_size, oversize_action
+                    )
+
+    if need_save and cover_for_save:
         cover_path = out_dir / "cover.jpg"
         cover_path.parent.mkdir(parents=True, exist_ok=True)
         if not cover_path.exists():
-            cover_path.write_bytes(cover)
+            cover_path.write_bytes(cover_for_save)
             console.print("  [green]✓[/] cover.jpg")
 
     retries          = int(cfg.get("retries", 3))
     on_final_failure = cfg.get("on_final_failure", "delete_partial")
 
     downloaded_files: List[Path] = []
-    if cfg.get("save_cover") and cover:
+    if need_save and cover_for_save:
         downloaded_files.append(out_dir / "cover.jpg")
 
     abort_album = False
@@ -477,7 +497,7 @@ def download_album(
                 out_dir          = track_dir,
                 track_tmpl       = track_tmpl,
                 quality_id       = quality_id,
-                cover            = cover,
+                cover            = cover_for_embed,
                 meta_fields      = meta_flds,
                 skip_existing    = cfg.get("skip_existing", True),
                 progress         = progress,

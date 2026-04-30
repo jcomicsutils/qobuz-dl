@@ -55,6 +55,19 @@ def _complete_config_value(
         from ..constants import QUALITY_MAP
         return [CompletionItem(k) for k in QUALITY_MAP if k.startswith(incomplete)]
 
+    if key in ("cover_size", "embed_cover_size"):
+        from ..constants import COVER_SIZES
+        return [
+            CompletionItem(k) for k in COVER_SIZES if k.startswith(incomplete)
+        ]
+
+    if key == "embed_cover_oversize_action":
+        return [
+            CompletionItem(v)
+            for v in ("use_large", "skip")
+            if v.startswith(incomplete)
+        ]
+
     if key == "on_final_failure":
         return [
             CompletionItem(v)
@@ -192,6 +205,19 @@ def config_cmd(key: Optional[str], value: Optional[str]) -> None:
     elif key == "folder_truncate_pos":
         if value not in ("end", "middle"):
             raise click.ClickException("folder_truncate_pos must be 'end' or 'middle'")
+        cfg[key] = value
+    elif key in ("cover_size", "embed_cover_size"):
+        from ..constants import COVER_SIZES
+        if value not in COVER_SIZES:
+            raise click.ClickException(
+                f"{key} must be one of: {', '.join(COVER_SIZES)}"
+            )
+        cfg[key] = value
+    elif key == "embed_cover_oversize_action":
+        if value not in ("use_large", "skip"):
+            raise click.ClickException(
+                "embed_cover_oversize_action must be 'use_large' or 'skip'"
+            )
         cfg[key] = value
     elif key == "on_final_failure":
         valid = ("keep_partial", "delete_partial", "delete_album")

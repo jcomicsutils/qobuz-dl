@@ -6,7 +6,9 @@ Covers every public function.  No network calls, no file I/O, no credentials.
 
 import pytest
 import click
+from unittest.mock import patch
 
+import qobuz_dl.utils
 from qobuz_dl.utils import (
     _truncate_bytes,
     _utf8_leading_len,
@@ -24,13 +26,27 @@ from qobuz_dl.utils import (
     strip_feat_from_album_title,
     strip_feat_from_track_title,
     truncate_name,
+    dbg,
+    _track_has_featured_artist,
 )
 
+class TestDebugLogging:
+    @patch("qobuz_dl.utils.console.print")
+    def test_dbg_silent_when_verbose_false(self, mock_print):
+        qobuz_dl.utils._VERBOSE = False
+        dbg("Test message")
+        mock_print.assert_not_called()
+
+    @patch("qobuz_dl.utils.console.print")
+    def test_dbg_prints_when_verbose_true(self, mock_print):
+        qobuz_dl.utils._VERBOSE = True
+        dbg("Test message")
+        mock_print.assert_called_once_with("[dim][DEBUG][/dim] Test message")
+        qobuz_dl.utils._VERBOSE = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # clean_name
 # ─────────────────────────────────────────────────────────────────────────────
-
 class TestCleanName:
     def test_replaces_forward_slash(self):
         assert clean_name("AC/DC") == "AC_DC"
@@ -392,10 +408,21 @@ class TestApplyVersionToTitle:
         apply_version_to_title(data)
         assert data["title"] == "Dummy (Deluxe Edition)"
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # strip_feat_from_track_title
 # ─────────────────────────────────────────────────────────────────────────────
+class TestTrackHasFeaturedArtist:
+    def test_returns_true_if_featured_artist_present(self):
+        track = {"performers": "Main Artist - FeaturedArtist"}
+        assert _track_has_featured_artist(track) is True
+
+    def test_returns_false_if_no_featured_artist(self):
+        track = {"performers": "Main Artist - Producer"}
+        assert _track_has_featured_artist(track) is False
+
+    def test_returns_false_if_performers_missing_or_empty(self):
+        assert _track_has_featured_artist({}) is False
+        assert _track_has_featured_artist({"performers": ""}) is False
 
 class TestStripFeatFromTrackTitle:
     # helper: build a track dict with a FeaturedArtist marker

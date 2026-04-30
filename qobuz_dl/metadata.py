@@ -9,6 +9,7 @@ from typing import Dict, Optional
 
 import requests
 
+from .constants import COVER_EMBED_MAX_BYTES, COVER_SIZES
 from .utils import console, dbg, get_artists, get_main_artist, get_year
 
 
@@ -16,23 +17,112 @@ from .utils import console, dbg, get_artists, get_main_artist, get_year
 # Cover art
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_cover(album: Dict, session: requests.Session) -> Optional[bytes]:
-    img_url = album.get("image", {}).get("large", "")
-    if img_url:
-        # Replace last 7 chars (e.g. "600.jpg") with "org.jpg" for full-res
-        img_url = img_url[:-7] + "org.jpg"
-    if not img_url:
+def _cover_url(album: Dict, size: str) -> str:
+    """Return the CDN URL for *size* (one of the COVER_SIZES keys).
+
+    Qobuz's API exposes three keys in album.image:
+      "thumbnail" → _50.jpg
+      "small"     → _230.jpg
+      "large"     → _600.jpg
+
+    The original (_org.jpg) is not returned directly but can be derived by
+    replacing the suffix on the large URL.
+    """
+    image = album.get("image", {})
+
+    # Map our size names to the API image keys where they exist.
+    api_key_map = {
+        "thumbnail": "thumbnail",
+        "small":     "small",
+        "large":     "large",
+    }
+
+    if size in api_key_map:
+        url = image.get(api_key_map[size], "") or image.get("large", "")
+    else:
+        # "original" — derive from large URL
+        url = image.get("large", "")
+
+    if not url:
+        return ""
+
+    # Replace the numeric suffix (e.g. "600.jpg") or "org.jpg" with the
+    # target suffix so we always land on the right CDN path.
+    suffix = COVER_SIZES[size]          # e.g. "600", "org"
+    # Strip everything after the last underscore and replace with our suffix.
+    base = url.rsplit("_", 1)[0]        # e.g. ".../0060252795442"
+    return f"{base}_{suffix}.jpg"
+
+
+def fetch_cover(album: Dict, session: requests.Session, size: str = "original") -> Optional[bytes]:
+    """Fetch cover art at the requested *size*.
+
+    *size* must be one of ``"thumbnail"``, ``"small"``, ``"large"``,
+    ``"original"``.  Returns ``None`` on failure.
+    """
+    if size not in COVER_SIZES:
+        dbg(f"Unknown cover size {size!r} — falling back to 'large'")
+        size = "large"
+
+    url = _cover_url(album, size)
+    if not url:
         dbg("No cover image URL found in album data")
         return None
-    dbg(f"Fetching cover art from {img_url}")
+
+    dbg(f"Fetching cover art ({size}) from {url}")
     try:
-        r = session.get(img_url, timeout=20)
+        r = session.get(url, timeout=20)
         r.raise_for_status()
         dbg(f"Cover art fetched — {len(r.content)} bytes")
         return r.content
     except Exception as exc:
         dbg(f"Cover art fetch failed: {exc}")
         return None
+
+
+def fetch_cover_for_embed(
+    album: Dict,
+    session: requests.Session,
+    size: str = "original",
+    oversize_action: str = "use_large",
+) -> Optional[bytes]:
+    """Fetch cover art intended for embedding inside an audio file.
+
+    Applies the oversize guard when *size* is ``"original"``:
+
+    - If the downloaded image exceeds ``COVER_EMBED_MAX_BYTES`` (16 MiB):
+
+      - ``"use_large"`` — fetches and returns the ``"large"`` (600×600) image
+        instead, logging a warning.
+      - ``"skip"``      — logs a warning and returns ``None``, which causes the
+        caller to skip cover embedding for this track.
+
+    For sizes other than ``"original"`` the guard is never applied because
+    thumbnail / small / large images are always well under the limit.
+    """
+    data = fetch_cover(album, session, size)
+
+    if data is None:
+        return None
+
+    if size == "original" and len(data) > COVER_EMBED_MAX_BYTES:
+        size_mb = len(data) / (1024 * 1024)
+        if oversize_action == "skip":
+            console.print(
+                f"  [yellow]⚠ Embedded cover skipped:[/] original image is "
+                f"{size_mb:.1f} MiB, which exceeds the 16 MiB FLAC limit "
+                f"(embed_cover_oversize_action = skip)."
+            )
+            return None
+        else:
+            # "use_large" (default)
+            console.print(
+                f"  [yellow]⚠ Original cover is {size_mb:.1f} MiB — "
+                f"falling back to large (600×600) for embedding.[/]"
+            )
+            return fetch_cover(album, session, "large")
+
+    return data
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -23,7 +23,7 @@ from ..api import QobuzAPI
 from ..config import get_meta_fields, load_config
 from ..constants import DEFAULT_CONFIG, EXT_MAP, QUALITY_LABELS, QUALITY_MAP
 from ..downloader import download_album, download_single_track, dry_run_album
-from ..metadata import fetch_cover
+from ..metadata import fetch_cover, fetch_cover_for_embed
 from ..utils import (
     apply_version_to_title,
     clean_name,
@@ -264,16 +264,38 @@ def dl(
                 track_meta_flds     = get_meta_fields(effective_cfg)
                 embed_cover_in_file = track_meta_flds is not None and track_meta_flds.get("cover", True)
 
-                cover = None
-                if effective_cfg.get("save_cover") or embed_cover_in_file:
-                    with console.status("Fetching cover art…"):
-                        cover = fetch_cover(album, api.session)
+                cover_size       = effective_cfg.get("cover_size", "original")
+                embed_cover_size = effective_cfg.get("embed_cover_size", "original")
+                oversize_action  = effective_cfg.get("embed_cover_oversize_action", "use_large")
 
-                if effective_cfg.get("save_cover") and cover:
+                need_save  = bool(effective_cfg.get("save_cover"))
+                need_embed = embed_cover_in_file
+
+                cover_for_save:  Optional[bytes] = None
+                cover_for_embed: Optional[bytes] = None
+
+                if need_save or need_embed:
+                    with console.status("Fetching cover art…"):
+                        if need_save and need_embed and cover_size == embed_cover_size:
+                            # Both purposes need the same size — fetch once, reuse.
+                            data = fetch_cover_for_embed(
+                                album, api.session, embed_cover_size, oversize_action
+                            )
+                            cover_for_save  = data
+                            cover_for_embed = data
+                        else:
+                            if need_save:
+                                cover_for_save = fetch_cover(album, api.session, cover_size)
+                            if need_embed:
+                                cover_for_embed = fetch_cover_for_embed(
+                                    album, api.session, embed_cover_size, oversize_action
+                                )
+
+                if need_save and cover_for_save:
                     cp = out_dir / "cover.jpg"
                     cp.parent.mkdir(parents=True, exist_ok=True)
                     if not cp.exists():
-                        cp.write_bytes(cover)
+                        cp.write_bytes(cover_for_save)
 
                 console.print(
                     Panel(
@@ -294,7 +316,7 @@ def dl(
                         out_dir          = out_dir,
                         track_tmpl       = t_tmpl,
                         quality_id       = quality_id,
-                        cover            = cover,
+                        cover            = cover_for_embed,
                         meta_fields      = track_meta_flds,
                         skip_existing    = effective_cfg.get("skip_existing", True),
                         progress         = progress,
