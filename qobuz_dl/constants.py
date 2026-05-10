@@ -49,6 +49,9 @@ EXT_MAP: Dict[str, str] = {
     "27": "flac",
 }
 
+# Descending quality order used for fallback chains.
+QUALITY_ORDER: list[str] = ["hi-res-192", "hi-res", "cd", "mp3"]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Cover art sizes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,6 +145,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "force_main_album_artist": False,
     "strip_feat_from_album_title": False,
     "strip_feat_from_track_title": False,
+    # ── quality fallback ──────────────────────────────────────────────────────
+    # When a track fails with a CDN IncompleteRead(1 bytes read, …) error on
+    # every retry attempt, automatically retry at successively lower qualities.
+    # Only CDN-broken errors trigger fallback; plain network errors do not.
+    "quality_fallback":      False,
+    # Ordered list of quality keys to attempt, highest first.  The download
+    # starts at the user's configured quality (or -q override) and walks down
+    # this list.  Truncate the list to stop at the lowest quality you accept.
+    "quality_fallback_path": ["hi-res-192", "hi-res", "cd"],
     # ── name truncation ───────────────────────────────────────────────────────
     "truncate_folder":          True,
     "folder_truncate_pos":      "end",    # "middle" | "end"

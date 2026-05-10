@@ -5,6 +5,7 @@ dry-run preview, and full album orchestration.
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,7 +26,7 @@ from rich.table import Table
 
 from .api import QobuzAPI
 from .config import get_meta_fields
-from .constants import EXT_MAP
+from .constants import EXT_MAP, QUALITY_MAP, QUALITY_LABELS, QUALITY_ORDER
 from .metadata import embed_flac_metadata, embed_mp3_metadata, fetch_cover, fetch_cover_for_embed
 from .utils import (
     apply_version_to_title,
@@ -42,6 +43,12 @@ from .utils import (
     truncate_name,
 )
 
+# Matches the specific CDN-broken pattern: server declares a full Content-Length
+# but drops the connection after exactly 1 byte.  This is distinct from ordinary
+# network errors and is used to gate quality fallback so we don't silently
+# downgrade on a simple connectivity blip.
+_INCOMPLETE_READ_RE = re.compile(r"IncompleteRead\(1 bytes read")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Low-level HTTP streaming
@@ -54,15 +61,27 @@ def stream_download(
     progress: Progress,
     task: TaskID,
     retries: int = 3,
-) -> bool:
+    url_fetcher=None,
+) -> Tuple[bool, bool]:
     """Stream *url* to *dest*, retrying up to *retries* times with exponential back-off.
 
-    Returns True on success.  The partial file (if any) is left in place on
-    failure so the caller can decide what to do with it.
+    If *url_fetcher* is provided (a zero-argument callable returning a fresh URL
+    string), it is called before each retry so each attempt uses a new signed URL.
+    This matters because Qobuz/Akamai CDN URLs can be invalidated server-side
+    after a failed transfer, causing every retry with the same URL to fail
+    identically.
+
+    Returns ``(success, cdn_broken)`` where *cdn_broken* is True when every
+    network failure matched the ``IncompleteRead(1 bytes read, …)`` pattern —
+    the signal that the CDN file itself is corrupt and a quality fallback should
+    be tried.  Any other kind of error (timeout, DNS, OS write error) sets
+    *cdn_broken* to False so that ordinary failures never trigger silent
+    quality downgrades.
     """
     dbg(f"Streaming download → {dest}  (retries={retries})")
     dbg(f"  URL: {url}")
     last_exc: Optional[Exception] = None
+    all_cdn_broken = True   # flipped False the moment any non-IncompleteRead error appears
 
     for attempt in range(retries + 1):
         if attempt > 0:
@@ -70,6 +89,15 @@ def stream_download(
             dbg(f"  Retry {attempt}/{retries} — waiting {delay}s after: {last_exc}")
             console.print(f"  [yellow]⟳ Retry {attempt}/{retries}[/] — waiting {delay}s…")
             time.sleep(delay)
+            if url_fetcher is not None:
+                try:
+                    url = url_fetcher()
+                    dbg(f"  Fresh URL obtained for retry {attempt}: {url}")
+                except Exception as exc:
+                    console.print(f"  [red]✗ URL refresh failed on retry {attempt}: {exc}[/]")
+                    all_cdn_broken = False
+                    last_exc = exc
+                    continue
             progress.update(task, completed=0, total=None)
 
         try:
@@ -87,9 +115,11 @@ def stream_download(
                             written += len(chunk)
                             progress.advance(task, len(chunk))
             dbg(f"  Download complete — {written} bytes written")
-            return True
+            return True, False
         except requests.RequestException as exc:
             last_exc = exc
+            if not _INCOMPLETE_READ_RE.search(str(exc)):
+                all_cdn_broken = False
             dbg(f"  Network error on attempt {attempt + 1}: {exc}")
             if attempt == retries:
                 console.print(
@@ -97,9 +127,9 @@ def stream_download(
                 )
         except OSError as exc:
             console.print(f"  [red]✗ File write error: {exc}[/]")
-            return False
+            return False, False
 
-    return False
+    return False, all_cdn_broken
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,79 +153,143 @@ def download_single_track(
     force_main_album_artist: bool = False,
     override_main_artist: Optional[str] = None,
 ) -> bool:
-    """Download a single track, honouring retry and on-failure settings.
+    """Download a single track, with optional quality fallback on CDN errors.
 
-    Returns True on success.
+    When ``cfg["quality_fallback"]`` is True and every retry fails with the
+    ``IncompleteRead(1 bytes read, …)`` CDN pattern, the download is retried at
+    the next lower quality in ``cfg["quality_fallback_path"]``.  Ordinary
+    network errors (timeouts, DNS failures, etc.) never trigger fallback.
 
-    on_final_failure controls what happens to the partial file after all
-    retry attempts are exhausted:
-      "keep_partial"   — leave the partial file on disk (resume-friendly)
-      "delete_partial" — delete just the partial file and continue
-      "delete_album"   — signal the album orchestrator to wipe all album files
+    ``on_final_failure`` is applied only after the full fallback chain is
+    exhausted.  Returns True on success.
     """
     album     = track.get("album", {})
-    ext       = EXT_MAP.get(quality_id, "flac")
+    trunc_cfg = cfg if cfg is not None else api.cfg
+    title     = track.get("title", "Unknown")
     track_no  = track.get("track_number", 0)
     disc_no   = track.get("media_number", 1)
-    title     = track.get("title", "Unknown")
-    trunc_cfg = cfg if cfg is not None else api.cfg
+    pad       = len(str(total_tracks))
+    label     = f"  [cyan]{track_no:>{pad}}.[/] {title[:55]}"
 
-    filename = safe_format(
-        track_tmpl,
-        track    = track_no,
-        disc     = disc_no,
-        title    = title,
-        artist   = (
-            get_artists(album) if album.get("artists") else
-            track.get("performer", {}).get("name", "Various Artists")
-        ),
-        album    = album.get("title", ""),
-        year     = get_year(album),
-        track_id = str(track.get("id", "")),
-    ) + f".{ext}"
-    filename = truncate_name(clean_name(filename), trunc_cfg, "filename")
-    dest     = out_dir / filename
-    dbg(f"Track {track_no} → {dest}  ({len(filename.encode())}B)")
+    def _artist() -> str:
+        return (
+            get_artists(album) if album.get("artists")
+            else track.get("performer", {}).get("name", "Various Artists")
+        )
 
-    if skip_existing and dest.exists():
-        dbg("  Skipping — file already exists")
-        console.print(f"  [dim]⟳[/] {filename}")
-        return True
+    def _filename(q_id: str) -> str:
+        ext = EXT_MAP.get(q_id, "flac")
+        raw = safe_format(
+            track_tmpl,
+            track    = track_no,
+            disc     = disc_no,
+            title    = title,
+            artist   = _artist(),
+            album    = album.get("title", ""),
+            year     = get_year(album),
+            track_id = str(track.get("id", "")),
+        ) + f".{ext}"
+        return truncate_name(clean_name(raw), trunc_cfg, "filename")
 
-    try:
-        url = api.get_track_url(track["id"], quality_id)
-    except Exception as exc:
-        console.print(f"  [red]✗ URL fetch failed for '{title}': {exc}[/]")
-        return False
+    # ── build the ordered list of quality IDs to attempt ─────────────────────
+    qualities_to_try: List[str] = [quality_id]
+    if cfg and cfg.get("quality_fallback", False):
+        path_keys = cfg.get("quality_fallback_path", QUALITY_ORDER)
+        path_ids  = [QUALITY_MAP[k] for k in path_keys if k in QUALITY_MAP]
+        if quality_id in path_ids:
+            idx = path_ids.index(quality_id)
+            qualities_to_try = path_ids[idx:]   # requested quality + all fallbacks below it
 
-    pad   = len(str(total_tracks))
-    label = f"  [cyan]{track_no:>{pad}}.[/] {title[:55]}"
-    task  = progress.add_task(label, total=None)
-    ok    = stream_download(url, dest, api.session, progress, task, retries=retries)
-    progress.remove_task(task)
+    # ── attempt each quality in order ────────────────────────────────────────
+    dest: Path = out_dir / _filename(quality_id)   # kept up-to-date each iteration
 
-    if ok:
-        if meta_fields is not None:
-            if ext == "flac":
-                embed_flac_metadata(dest, track, cover, meta_fields, force_main_album_artist, override_main_artist)
-            elif ext == "mp3":
-                embed_mp3_metadata(dest, track, cover, meta_fields, force_main_album_artist, override_main_artist)
-        console.print(f"  [green]✓[/] {filename}")
-    else:
-        partial_exists = dest.exists()
-        if on_final_failure == "keep_partial":
-            if partial_exists:
-                console.print(f"  [yellow]⚠ Keeping partial file (resume later):[/] {filename}")
-        elif on_final_failure == "delete_album":
-            if partial_exists:
-                dest.unlink(missing_ok=True)
-        else:
-            # "delete_partial" (default)
-            if partial_exists:
-                dest.unlink(missing_ok=True)
-                dbg(f"  Deleted partial file: {dest}")
+    for i, q_id in enumerate(qualities_to_try):
+        is_fallback = i > 0
+        fname = _filename(q_id)
+        dest  = out_dir / fname
+        ext   = EXT_MAP.get(q_id, "flac")
+        dbg(
+            f"Track {track_no} → {dest}  ({len(fname.encode())}B)"
+            + (f"  [fallback: {QUALITY_LABELS.get(q_id, q_id)}]" if is_fallback else "")
+        )
 
-    return ok
+        if skip_existing and dest.exists():
+            dbg("  Skipping — file already exists")
+            console.print(f"  [dim]⟳[/] {fname}")
+            return True
+
+        if is_fallback:
+            console.print(
+                f"  [yellow]⚠ CDN error on all retries — trying "
+                f"{QUALITY_LABELS.get(q_id, q_id)}[/]"
+            )
+
+        try:
+            url = api.get_track_url(track["id"], q_id)
+        except Exception as exc:
+            console.print(f"  [red]✗ URL fetch failed for '{title}': {exc}[/]")
+            return False
+
+        task = progress.add_task(label, total=None)
+        ok, cdn_broken = stream_download(
+            url, dest, api.session, progress, task, retries=retries,
+            url_fetcher=lambda _q=q_id: api.get_track_url(track["id"], _q),
+        )
+        progress.remove_task(task)
+
+        if ok:
+            if meta_fields is not None:
+                if ext == "flac":
+                    embed_flac_metadata(
+                        dest, track, cover, meta_fields,
+                        force_main_album_artist, override_main_artist,
+                    )
+                elif ext == "mp3":
+                    embed_mp3_metadata(
+                        dest, track, cover, meta_fields,
+                        force_main_album_artist, override_main_artist,
+                    )
+            suffix = (
+                f" [dim](fallback: {QUALITY_LABELS.get(q_id, q_id)})[/]"
+                if is_fallback else ""
+            )
+            console.print(f"  [green]✓[/] {fname}{suffix}")
+            return True
+
+        # ── this quality failed ───────────────────────────────────────────────
+        has_next = i < len(qualities_to_try) - 1
+        if cdn_broken and has_next:
+            # Clean up the 1-byte partial and try the next quality.
+            dest.unlink(missing_ok=True)
+            dbg(f"  Deleted partial file before fallback: {dest}")
+            continue
+
+        if cdn_broken and not has_next:
+            console.print(
+                f"  [red]✗ CDN error on all retries at every fallback quality "
+                f"for '{title}'.[/]"
+            )
+        elif not cdn_broken:
+            dbg("  Non-CDN failure — not attempting quality fallback")
+
+        break   # fall through to on_final_failure
+
+    # ── on_final_failure ─────────────────────────────────────────────────────
+    partial_exists = dest.exists()
+    if on_final_failure == "keep_partial":
+        if partial_exists:
+            console.print(
+                f"  [yellow]⚠ Keeping partial file (resume later):[/] {dest.name}"
+            )
+    elif on_final_failure == "delete_album":
+        if partial_exists:
+            dest.unlink(missing_ok=True)
+    else:   # "delete_partial" (default)
+        if partial_exists:
+            dest.unlink(missing_ok=True)
+            dbg(f"  Deleted partial file: {dest}")
+
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────

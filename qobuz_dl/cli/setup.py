@@ -13,6 +13,7 @@ from ..constants import (
     METADATA_FIELDS,
     QUALITY_MAP,
     QUALITY_LABELS,
+    QUALITY_ORDER,
     TEMPLATE_HELP,
 )
 from ..utils import console
@@ -59,6 +60,50 @@ def setup() -> None:
         type=click.Choice(list(QUALITY_MAP)),
     )
 
+    # ── quality fallback ──────────────────────────────────────────────────────
+    console.print()
+    console.print(
+        "Enable quality fallback on CDN errors?\n"
+        "  [dim]If a hi-res file is broken on Qobuz's CDN (connection drops after\n"
+        "  1 byte on every retry), automatically retry at the next lower quality\n"
+        "  rather than skipping the track.[/]"
+    )
+    cfg["quality_fallback"] = click.confirm("  Quality fallback", default=cfg.get("quality_fallback", False))
+
+    if cfg["quality_fallback"]:
+        console.print(
+            "\n[bold]Quality fallback path[/] — ordered list of qualities to try, "
+            "highest first.\n"
+            "[dim]The download starts at your configured quality and walks down\n"
+            "this list until one succeeds or the list is exhausted.\n"
+            "Truncate the list at the lowest quality you are willing to accept.\n"
+            f"Available (highest → lowest): {', '.join(QUALITY_ORDER)}[/]\n"
+        )
+        current_path = ", ".join(
+            cfg.get("quality_fallback_path", ["hi-res-192", "hi-res", "cd"])
+        )
+        while True:
+            raw = click.prompt("Fallback path (comma-separated)", default=current_path)
+            parsed = [q.strip() for q in raw.split(",") if q.strip() in QUALITY_ORDER]
+            invalid = [q.strip() for q in raw.split(",") if q.strip() and q.strip() not in QUALITY_ORDER]
+            if invalid:
+                console.print(
+                    f"  [yellow]⚠ Unrecognised quality name(s): {', '.join(invalid)}\n"
+                    f"  Valid values: {', '.join(QUALITY_ORDER)}[/]"
+                )
+                continue
+            if not parsed:
+                console.print(
+                    f"  [yellow]⚠ Path is empty — enter at least one quality name.[/]"
+                )
+                continue
+            cfg["quality_fallback_path"] = parsed
+            console.print(
+                f"  [dim]Fallback path set to: {' → '.join(parsed)}[/]"
+            )
+            break
+
+    # ── templates ─────────────────────────────────────────────────────────────
     console.print(TEMPLATE_HELP)
 
     cfg["folder_template"] = click.prompt(
@@ -260,7 +305,8 @@ def setup() -> None:
     )
 
     console.print(
-        "\nOn final failure (after all retries are exhausted), what should happen?\n"
+        "\nOn final failure (after all retries and fallbacks are exhausted), "
+        "what should happen?\n"
         "  [cyan]keep_partial[/]   \u2014 keep the partial file on disk (resume-friendly)\n"
         "  [cyan]delete_partial[/] \u2014 delete just the failed track and continue\n"
         "  [cyan]delete_album[/]   \u2014 delete every file downloaded for that album and continue"

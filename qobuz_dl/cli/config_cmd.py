@@ -12,7 +12,7 @@ import click
 from rich.table import Table
 
 from ..config import load_config, save_config
-from ..constants import DEFAULT_CONFIG, METADATA_FIELDS
+from ..constants import DEFAULT_CONFIG, METADATA_FIELDS, QUALITY_ORDER
 from ..utils import console
 
 
@@ -24,6 +24,7 @@ _BOOL_CONFIG_KEYS = {
     "embed_metadata", "save_cover", "skip_existing", "multi_disc",
     "include_version", "force_main_album_artist", "strip_feat_from_album_title",
     "strip_feat_from_track_title", "truncate_filename", "truncate_folder",
+    "quality_fallback",
 }
 
 
@@ -54,6 +55,9 @@ def _complete_config_value(
     if key == "quality":
         from ..constants import QUALITY_MAP
         return [CompletionItem(k) for k in QUALITY_MAP if k.startswith(incomplete)]
+
+    if key == "quality_fallback_path":
+        return [CompletionItem(q) for q in QUALITY_ORDER if q.startswith(incomplete)]
 
     if key in ("cover_size", "embed_cover_size"):
         from ..constants import COVER_SIZES
@@ -105,6 +109,8 @@ def config_cmd(key: Optional[str], value: Optional[str]) -> None:
       qobuz-dl config download_dir ~/Music            # set a value
       qobuz-dl config quality cd
       qobuz-dl config folder_template "{artist}/{year} - {album}"
+      qobuz-dl config quality_fallback true
+      qobuz-dl config quality_fallback_path "hi-res-192, hi-res, cd"
 
     \b
     Metadata fields use dot notation:
@@ -189,6 +195,20 @@ def config_cmd(key: Optional[str], value: Optional[str]) -> None:
     # ── type-aware coercion ───────────────────────────────────────────────────
     if key == "auth_tokens":
         cfg[key] = [t.strip() for t in value.split(",") if t.strip()]
+    elif key == "quality_fallback_path":
+        parsed = [q.strip() for q in value.split(",") if q.strip() in QUALITY_ORDER]
+        invalid = [q.strip() for q in value.split(",") if q.strip() and q.strip() not in QUALITY_ORDER]
+        if invalid:
+            raise click.ClickException(
+                f"Unrecognised quality name(s): {', '.join(invalid)}\n"
+                f"Valid values: {', '.join(QUALITY_ORDER)}"
+            )
+        if not parsed:
+            raise click.ClickException(
+                f"No valid quality keys found in {value!r}.\n"
+                f"Valid values: {', '.join(QUALITY_ORDER)}"
+            )
+        cfg[key] = parsed
     elif key in _BOOL_CONFIG_KEYS or key in (
         "strip_feat_from_album_title", "strip_feat_from_track_title"
     ):
