@@ -11,6 +11,8 @@ from ..config import load_config, save_config
 from ..constants import (
     CONFIG_FILE,
     METADATA_FIELDS,
+    PREVIEW_DURATION,
+    PREVIEW_DURATION_TOLERANCE,
     QUALITY_MAP,
     QUALITY_LABELS,
     QUALITY_ORDER,
@@ -102,6 +104,23 @@ def setup() -> None:
                 f"  [dim]Fallback path set to: {' → '.join(parsed)}[/]"
             )
             break
+
+    # ── duration check ────────────────────────────────────────────────────────
+    console.print()
+    console.print(
+        "Enable duration check for downloaded files?\n"
+        f"  [dim]When an auth token expires, Qobuz returns a valid HTTP 200 response\n"
+        f"  but serves a {PREVIEW_DURATION:.0f}-second preview clip instead of the full track.\n"
+        f"  With this option on, every downloaded file is inspected with mutagen.\n"
+        f"  If the file is within ±{PREVIEW_DURATION_TOLERANCE:.0f}s of {PREVIEW_DURATION:.0f}s but the track should be longer,\n"
+        f"  qobuz-dl retries with each configured token in turn.\n"
+        f"  If all tokens return previews, the track fails and on_final_failure applies.\n"
+        f"  Adds a brief mutagen read after each track — negligible overhead.[/]"
+    )
+    cfg["duration_check"] = click.confirm(
+        "  Duration check",
+        default=cfg.get("duration_check", False),
+    )
 
     # ── templates ─────────────────────────────────────────────────────────────
     console.print(TEMPLATE_HELP)

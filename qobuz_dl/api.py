@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import random
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import click
 import requests
@@ -37,10 +37,27 @@ class QobuzAPI:
             )
         return random.choice(tokens)
 
+    @property
+    def all_tokens(self) -> List[str]:
+        """Return all configured auth tokens (deduplicated, order preserved)."""
+        seen: set = set()
+        result: List[str] = []
+        for t in self.cfg.get("auth_tokens", []):
+            if t not in seen:
+                seen.add(t)
+                result.append(t)
+        return result
+
     def _headers(self) -> Dict[str, str]:
         return {
             "x-app-id":          self.cfg["app_id"],
             "x-user-auth-token": self.token,
+        }
+
+    def _headers_for_token(self, token: str) -> Dict[str, str]:
+        return {
+            "x-app-id":          self.cfg["app_id"],
+            "x-user-auth-token": token,
         }
 
     # ── request ───────────────────────────────────────────────────────────────
@@ -86,7 +103,8 @@ class QobuzAPI:
             track_size=1000,
         )
 
-    def get_track_url(self, track_id: int, quality: str) -> str:
+    def _sign_track_url_params(self, track_id: int, quality: str) -> Dict[str, Any]:
+        """Build the signed parameters for track/getFileUrl (token-agnostic)."""
         secret  = self.cfg["secret"]
         ts      = int(time.time())
         r_sig   = (
@@ -94,17 +112,48 @@ class QobuzAPI:
             f"intentstreamtrack_id{track_id}{ts}{secret}"
         )
         sig_md5 = hashlib.md5(r_sig.encode()).hexdigest()
-        dbg(f"Requesting file URL — track_id={track_id}  format_id={quality}  ts={ts}")
-        data = self._get(
-            "track/getFileUrl",
+        return dict(
             format_id=quality,
             intent="stream",
             track_id=track_id,
             request_ts=ts,
             request_sig=sig_md5,
         )
+
+    def get_track_url(self, track_id: int, quality: str) -> str:
+        """Fetch a signed stream URL using a randomly-chosen auth token."""
+        params = self._sign_track_url_params(track_id, quality)
+        dbg(f"Requesting file URL — track_id={track_id}  format_id={quality}  ts={params['request_ts']}")
+        data = self._get("track/getFileUrl", **params)
         dbg(
             f"File URL obtained — mime={data.get('mime_type')!r}  "
+            f"sampling_rate={data.get('sampling_rate')}  bit_depth={data.get('bit_depth')}"
+        )
+        return data["url"]
+
+    def get_track_url_with_token(self, track_id: int, quality: str, token: str) -> str:
+        """Fetch a signed stream URL using a *specific* auth token.
+
+        Used by the duration-check retry loop to cycle through each configured
+        token individually rather than picking one at random.
+        """
+        params = self._sign_track_url_params(track_id, quality)
+        dbg(
+            f"Requesting file URL (token override) — track_id={track_id}  "
+            f"format_id={quality}  ts={params['request_ts']}"
+        )
+        base = self.cfg.get("api_base", DEFAULT_CONFIG["api_base"]).rstrip("/")
+        url  = f"{base}/track/getFileUrl"
+        r = self.session.get(
+            url,
+            headers=self._headers_for_token(token),
+            params=params,
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        dbg(
+            f"File URL obtained (token override) — mime={data.get('mime_type')!r}  "
             f"sampling_rate={data.get('sampling_rate')}  bit_depth={data.get('bit_depth')}"
         )
         return data["url"]

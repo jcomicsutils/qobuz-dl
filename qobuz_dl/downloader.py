@@ -26,7 +26,14 @@ from rich.table import Table
 
 from .api import QobuzAPI
 from .config import get_meta_fields
-from .constants import EXT_MAP, QUALITY_MAP, QUALITY_LABELS, QUALITY_ORDER
+from .constants import (
+    EXT_MAP,
+    PREVIEW_DURATION,
+    PREVIEW_DURATION_TOLERANCE,
+    QUALITY_MAP,
+    QUALITY_LABELS,
+    QUALITY_ORDER,
+)
 from .metadata import embed_flac_metadata, embed_mp3_metadata, fetch_cover, fetch_cover_for_embed
 from .utils import (
     apply_version_to_title,
@@ -133,6 +140,43 @@ def stream_download(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Duration check helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_audio_duration(path: Path) -> Optional[float]:
+    """Return the audio duration of *path* in seconds, or None on failure.
+
+    Uses mutagen (already a hard dependency) to inspect both FLAC and MP3 files
+    without re-reading the entire file.
+    """
+    try:
+        from mutagen import File as MutagenFile  # type: ignore
+        audio = MutagenFile(path)
+        if audio is not None and hasattr(audio, "info") and hasattr(audio.info, "length"):
+            length = float(audio.info.length)
+            dbg(f"  Duration check: {path.name} → {length:.1f}s")
+            return length
+    except Exception as exc:
+        dbg(f"  Duration check failed ({path.name}): {exc}")
+    return None
+
+
+def _is_preview_duration(measured: float, expected_seconds: int) -> bool:
+    """Return True if *measured* looks like a Qobuz 30-second preview clip.
+
+    Two conditions must both hold:
+      1. The measured duration is within PREVIEW_DURATION_TOLERANCE of
+         PREVIEW_DURATION (30 s).
+      2. The track's expected API duration is long enough that it *cannot*
+         legitimately be a ~30 s track — this avoids false positives on
+         genuinely short pieces.
+    """
+    near_preview = abs(measured - PREVIEW_DURATION) <= PREVIEW_DURATION_TOLERANCE
+    track_is_longer = expected_seconds > PREVIEW_DURATION + PREVIEW_DURATION_TOLERANCE
+    return near_preview and track_is_longer
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Single-track download
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -153,15 +197,26 @@ def download_single_track(
     force_main_album_artist: bool = False,
     override_main_artist: Optional[str] = None,
 ) -> bool:
-    """Download a single track, with optional quality fallback on CDN errors.
+    """Download a single track, with optional quality fallback on CDN errors
+    and optional duration-check to detect expired-token 30-second previews.
 
+    Quality fallback
+    ~~~~~~~~~~~~~~~~
     When ``cfg["quality_fallback"]`` is True and every retry fails with the
-    ``IncompleteRead(1 bytes read, …)`` CDN pattern, the download is retried at
-    the next lower quality in ``cfg["quality_fallback_path"]``.  Ordinary
-    network errors (timeouts, DNS failures, etc.) never trigger fallback.
+    ``IncompleteRead(1 bytes read, …)`` CDN pattern, the download is retried
+    at the next lower quality in ``cfg["quality_fallback_path"]``.
 
-    ``on_final_failure`` is applied only after the full fallback chain is
-    exhausted.  Returns True on success.
+    Duration check
+    ~~~~~~~~~~~~~~
+    When ``cfg["duration_check"]`` is True, the downloaded file's audio
+    duration is measured with mutagen after each successful HTTP transfer.
+    If the file is ~30 seconds long but the API reports a longer duration,
+    Qobuz has served a preview clip — a sign the current auth token is
+    expired.  qobuz-dl then retries the download using each remaining
+    configured token in turn.  If all tokens produce previews, the failure
+    is handled by ``on_final_failure`` exactly like a network failure.
+
+    Returns True on success.
     """
     album     = track.get("album", {})
     trunc_cfg = cfg if cfg is not None else api.cfg
@@ -170,6 +225,9 @@ def download_single_track(
     disc_no   = track.get("media_number", 1)
     pad       = len(str(total_tracks))
     label     = f"  [cyan]{track_no:>{pad}}.[/] {title[:55]}"
+
+    duration_check = bool(cfg.get("duration_check", False)) if cfg else False
+    expected_secs  = int(track.get("duration", 0))
 
     def _artist() -> str:
         return (
@@ -238,23 +296,42 @@ def download_single_track(
         progress.remove_task(task)
 
         if ok:
-            if meta_fields is not None:
-                if ext == "flac":
-                    embed_flac_metadata(
-                        dest, track, cover, meta_fields,
-                        force_main_album_artist, override_main_artist,
-                    )
-                elif ext == "mp3":
-                    embed_mp3_metadata(
-                        dest, track, cover, meta_fields,
-                        force_main_album_artist, override_main_artist,
-                    )
-            suffix = (
-                f" [dim](fallback: {QUALITY_LABELS.get(q_id, q_id)})[/]"
-                if is_fallback else ""
-            )
-            console.print(f"  [green]✓[/] {fname}{suffix}")
-            return True
+            # ── duration check ────────────────────────────────────────────────
+            if duration_check:
+                ok = _duration_check_and_retry(
+                    api=api,
+                    track=track,
+                    dest=dest,
+                    q_id=q_id,
+                    label=label,
+                    fname=fname,
+                    expected_secs=expected_secs,
+                    retries=retries,
+                    progress=progress,
+                    cfg=cfg,
+                )
+                if not ok:
+                    # All tokens returned previews — fall through to on_final_failure.
+                    break
+
+            if ok:
+                if meta_fields is not None:
+                    if ext == "flac":
+                        embed_flac_metadata(
+                            dest, track, cover, meta_fields,
+                            force_main_album_artist, override_main_artist,
+                        )
+                    elif ext == "mp3":
+                        embed_mp3_metadata(
+                            dest, track, cover, meta_fields,
+                            force_main_album_artist, override_main_artist,
+                        )
+                suffix = (
+                    f" [dim](fallback: {QUALITY_LABELS.get(q_id, q_id)})[/]"
+                    if is_fallback else ""
+                )
+                console.print(f"  [green]✓[/] {fname}{suffix}")
+                return True
 
         # ── this quality failed ───────────────────────────────────────────────
         has_next = i < len(qualities_to_try) - 1
@@ -289,6 +366,108 @@ def download_single_track(
             dest.unlink(missing_ok=True)
             dbg(f"  Deleted partial file: {dest}")
 
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Duration-check token-rotation helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _duration_check_and_retry(
+    api:          QobuzAPI,
+    track:        Dict,
+    dest:         Path,
+    q_id:         str,
+    label:        str,
+    fname:        str,
+    expected_secs: int,
+    retries:      int,
+    progress:     Progress,
+    cfg:          Optional[Dict[str, Any]],
+) -> bool:
+    """Check whether *dest* is a 30-second preview; if so, retry with other tokens.
+
+    Returns True if the file on disk is (or becomes) a full-length download.
+    Returns False if every configured token produces a preview, leaving *dest*
+    containing the last preview attempt (caller applies on_final_failure).
+    """
+    measured = _get_audio_duration(dest)
+
+    if measured is None:
+        # Can't measure — assume it's fine rather than false-positive aborting.
+        dbg("  Duration check: unable to measure — skipping check")
+        return True
+
+    if not _is_preview_duration(measured, expected_secs):
+        dbg(
+            f"  Duration check passed: {measured:.1f}s  "
+            f"(expected ≈{expected_secs}s)"
+        )
+        return True
+
+    # ── preview detected ──────────────────────────────────────────────────────
+    console.print(
+        f"  [bold yellow]⚠ Preview detected[/] for [italic]{track.get('title', '?')}[/]: "
+        f"file is {measured:.0f}s but track should be {expected_secs}s. "
+        f"Auth token may be expired."
+    )
+
+    all_tokens = api.all_tokens
+    dbg(f"  Will try {len(all_tokens)} token(s) to get the full file")
+
+    for token_idx, token in enumerate(all_tokens):
+        console.print(
+            f"  [dim]Retrying with token {token_idx + 1}/{len(all_tokens)} "
+            f"({token[:6]}…)[/]"
+        )
+        try:
+            retry_url = api.get_track_url_with_token(track["id"], q_id, token)
+        except Exception as exc:
+            console.print(f"  [red]✗ URL fetch failed with token {token_idx + 1}: {exc}[/]")
+            continue
+
+        task = progress.add_task(label, total=None)
+        ok, _cdn = stream_download(
+            retry_url,
+            dest,
+            api.session,
+            progress,
+            task,
+            retries=retries,
+            url_fetcher=lambda _tok=token, _q=q_id: api.get_track_url_with_token(
+                track["id"], _q, _tok
+            ),
+        )
+        progress.remove_task(task)
+
+        if not ok:
+            dbg(f"  Token {token_idx + 1} — stream failed, trying next")
+            continue
+
+        retry_measured = _get_audio_duration(dest)
+        if retry_measured is None:
+            dbg(f"  Token {token_idx + 1} — duration unmeasurable, assuming success")
+            return True
+
+        if not _is_preview_duration(retry_measured, expected_secs):
+            dbg(
+                f"  Token {token_idx + 1} — full file confirmed "
+                f"({retry_measured:.1f}s)"
+            )
+            return True
+
+        dbg(
+            f"  Token {token_idx + 1} — still a preview "
+            f"({retry_measured:.0f}s), trying next"
+        )
+
+    # Every token produced a preview.
+    console.print(
+        f"  [bold red]✗ All {len(all_tokens)} token(s) returned a 30-second preview "
+        f"for '{track.get('title', '?')}'. "
+        f"Your auth token(s) may have expired — run [bold]qobuz-dl setup[/bold] "
+        f"to update them.[/]"
+    )
     return False
 
 

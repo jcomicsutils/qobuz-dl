@@ -24,7 +24,7 @@ _BOOL_CONFIG_KEYS = {
     "embed_metadata", "save_cover", "skip_existing", "multi_disc",
     "include_version", "force_main_album_artist", "strip_feat_from_album_title",
     "strip_feat_from_track_title", "truncate_filename", "truncate_folder",
-    "quality_fallback",
+    "quality_fallback", "duration_check",
 }
 
 
@@ -111,6 +111,7 @@ def config_cmd(key: Optional[str], value: Optional[str]) -> None:
       qobuz-dl config folder_template "{artist}/{year} - {album}"
       qobuz-dl config quality_fallback true
       qobuz-dl config quality_fallback_path "hi-res-192, hi-res, cd"
+      qobuz-dl config duration_check true
 
     \b
     Metadata fields use dot notation:

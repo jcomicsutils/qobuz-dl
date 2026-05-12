@@ -110,6 +110,23 @@ METADATA_FIELDS: Dict[str, bool] = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Duration check
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Qobuz serves a 30-second preview when an auth token has expired.  The server
+# returns HTTP 200 and a valid audio file, so there is no HTTP-level signal —
+# the only way to detect this is to measure the downloaded file's duration.
+#
+# A file is considered a preview when ALL of the following are true:
+#   1. Its measured duration is within PREVIEW_DURATION_TOLERANCE seconds of
+#      PREVIEW_DURATION (30 s).
+#   2. The track's expected duration (from the API) exceeds
+#      PREVIEW_DURATION + PREVIEW_DURATION_TOLERANCE, i.e. the track is
+#      genuinely longer than 30 s and could not have been a real 30-second track.
+PREVIEW_DURATION: float = 30.0          # seconds Qobuz uses for previews
+PREVIEW_DURATION_TOLERANCE: float = 2.0 # ± seconds allowed when comparing
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Default config
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -154,6 +171,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # starts at the user's configured quality (or -q override) and walks down
     # this list.  Truncate the list to stop at the lowest quality you accept.
     "quality_fallback_path": ["hi-res-192", "hi-res", "cd"],
+    # ── duration check ────────────────────────────────────────────────────────
+    # When True, every successfully downloaded file is inspected with mutagen.
+    # If the file's audio duration is within PREVIEW_DURATION_TOLERANCE seconds
+    # of PREVIEW_DURATION (30 s) AND the track's expected duration is longer,
+    # Qobuz has returned a 30-second preview — the token is likely expired.
+    # qobuz-dl retries with each remaining configured auth token in turn.
+    # If every token produces a preview, on_final_failure is applied.
+    "duration_check": False,
     # ── name truncation ───────────────────────────────────────────────────────
     "truncate_folder":          True,
     "folder_truncate_pos":      "end",    # "middle" | "end"
