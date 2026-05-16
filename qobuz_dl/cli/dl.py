@@ -57,19 +57,19 @@ from .completions import _complete_id_prefixes
               default=None, help="Folder naming template")
 @click.option("-f", "--track-template",
               default=None, help="Track filename template  (no extension)")
-@click.option("--no-metadata", "no_metadata",
+@click.option("-M", "--no-metadata", "no_metadata",
               is_flag=True, help="Skip metadata embedding")
-@click.option("--no-cover", "no_cover",
+@click.option("-C", "--no-cover", "no_cover",
               is_flag=True, help="Skip saving cover.jpg")
-@click.option("--no-skip", "no_skip",
+@click.option("-S", "--no-skip", "no_skip",
               is_flag=True, help="Re-download even if file exists")
-@click.option("--dry-run", "dry_run",
+@click.option("-n", "--dry-run", "dry_run",
               is_flag=True, help="Preview what would be downloaded — no files written")
 @click.option("-r", "--retries",
               default=None, type=int, help="Override retry count on network failure")
-@click.option("--override-main-artist",
+@click.option("-a", "--override-main-artist",
               default=None, help="Override the main artist (Album Artist) for this run")
-@click.option("--override-artist-id", is_flag=True, help=(
+@click.option("-i", "--override-artist-id", is_flag=True, help=(
     "Force a single artist_id across all downloads in this run. "
     "The ID is taken from the first artist URL / ar-id target supplied; "
     "if no artist target is given it is inferred from the first album or track processed. "
