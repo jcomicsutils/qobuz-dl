@@ -230,14 +230,6 @@ Tab will complete subcommands, flags, quality choices, search types, and more.
 | Bash | Add `eval "$(_QOBUZ_DL_COMPLETE=bash_source qobuz-dl)"` to `~/.bashrc` |
 | Zsh  | Add `eval "$(_QOBUZ_DL_COMPLETE=zsh_source  qobuz-dl)"` to `~/.zshrc`  |
 
-### `info`
-
-Show metadata about an album or track without downloading anything.
-
-```bash
-qobuz-dl info https://open.qobuz.com/album/bvfy6ys14qrrc
-qobuz-dl info https://open.qobuz.com/track/229720604
-```
 
 ## Template Variables
 
