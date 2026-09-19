@@ -31,6 +31,8 @@ def _complete_id_prefixes(
 
     if ctx.command.name != "info":
         prefixes.insert(0, CompletionItem("ar-id", help="artist ID"))
+        prefixes.append(CompletionItem("--next", help="batch separator for next target group"))
+        prefixes.append(CompletionItem("+", help="batch separator for next target group"))
 
     return [p for p in prefixes if p.value.startswith(incomplete)]
 

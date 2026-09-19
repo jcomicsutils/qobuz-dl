@@ -170,6 +170,16 @@ qobuz-dl dl al-id bvfy6ys14qrrc -r 5
 # Override the Album Artist tag for this run
 qobuz-dl dl al-id bvfy6ys14qrrc --override-main-artist "Various Artists"
 
+# Download multiple pages for the same artist
+qobuz-dl dl ar-id 1 2 -a "Artist Name"
+
+# Batch download multiple artists in one run using --next or +
+qobuz-dl dl ar-id 1 2 -a "Artist 1" --next ar-id 3 -a "Artist 2"
+qobuz-dl dl ar-id 1 2 -a "Artist 1" + ar-id 3 -a "Artist 2"
+
+# Global flags (e.g. -q, --dry-run) are inherited unless overridden
+qobuz-dl dl -q cd ar-id 1 2 -a "Artist 1" + ar-id 3 -a "Artist 2" -q mp3
+
 # Pin a single artist ID across all albums/tracks in this batch
 qobuz-dl dl al-id bvfy6ys14qrrc al-id xyz --override-artist-id
 ```
